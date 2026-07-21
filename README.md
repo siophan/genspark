@@ -51,7 +51,8 @@ Links outside `genspark.ai` open in your default browser. The renderer keeps Ele
 ## Tests
 
 ```sh
-npm test
+npm test              # unit tests, plain Node
+npm run test:integration   # injection against a real Electron page
 ```
 
-Covers the pure logic — path setup, script collection and injection, the file-watch debounce, window-state fallbacks, and internal/external URL classification. The Electron wiring itself is verified by running the app.
+The unit tests cover path setup, script collection and injection, the file-watch debounce, window-state fallbacks, and internal/external URL classification. The integration run loads a real page in Electron and checks that injected CSS applies, that injected JS runs in the page's main world, and that editing or deleting a CSS file updates the page without a reload.

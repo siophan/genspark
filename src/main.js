@@ -5,8 +5,11 @@ const { createInjector } = require('./injector')
 const { watchScripts } = require('./watcher')
 const { loadState, trackWindow } = require('./window-state')
 const { buildMenu } = require('./menu')
-
 const { HOME_URL, isInternal, isBrowsable } = require('./navigation')
+
+// Fixes the user data folder to ~/Library/Application Support/Genspark, so the
+// scripts live in the same place when run from source and when packaged.
+app.setName('Genspark')
 
 function openExternally(url) {
   if (isBrowsable(url)) shell.openExternal(url)
@@ -44,10 +47,13 @@ function createWindow(dir) {
   injector.attach()
 
   const watcher = watchScripts(dir, (exts) => {
+    // A change can land while the window is on its way out.
+    if (win.isDestroyed()) return
     if (exts.has('js')) injector.reloadForJS()
     else injector.reinjectCSS()
   })
-  win.on('closed', () => {
+  // Detach while the webContents is still alive.
+  win.on('close', () => {
     watcher.close()
     injector.dispose()
   })
