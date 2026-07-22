@@ -11,6 +11,11 @@ const { serveScripts } = require('../../src/script-bridge')
 const NEW_NAME = '老猫'
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'genspark-rename-'))
+// Sorted before the rename script, so it is already listening when it runs.
+fs.writeFileSync(
+  path.join(dir, '00-errors.js'),
+  'window.__errors = []; window.__bodyAtStart = String(!!document.body); window.addEventListener("error", (e) => window.__errors.push(e.message))',
+)
 fs.copyFileSync(
   path.join(__dirname, '../../examples/rename-to-laomao.js'),
   path.join(dir, 'rename.js'),
@@ -20,7 +25,12 @@ const page = path.join(dir, 'page.html')
 fs.writeFileSync(
   page,
   `<html>
-    <head><title>Genspark — AI agent</title></head>
+    <head>
+      <title>Genspark — AI agent</title>
+      <!-- Makes the parser pause here, which is when the preload injects and
+           document.body does not exist yet — the case that used to crash. -->
+      <script>window.__headScript = 1</script>
+    </head>
     <body>
       <h1 id="heading">Welcome to Genspark</h1>
       <p id="mixed">genspark, GenSpark and GENSPARK are all the same product.</p>
@@ -42,6 +52,13 @@ const checks = []
 const check = (name, fn) => checks.push({ name, fn })
 
 const read = (win, expr) => win.webContents.executeJavaScript(expr)
+
+check('the script survives running before the DOM exists', async (win) => {
+  // It runs at document-start, where document.body is still null. Assuming the
+  // DOM is there throws before anything gets renamed.
+  assert.strictEqual(await read(win, 'window.__bodyAtStart'), 'false', 'test is meaningless if body already exists')
+  assert.deepStrictEqual(await read(win, 'window.__errors'), [])
+})
 
 check('the original name is never present in the parsed document', async (win) => {
   assert.strictEqual(await read(win, 'window.__headingWhileParsing'), `Welcome to ${NEW_NAME}`)
