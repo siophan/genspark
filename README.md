@@ -34,6 +34,14 @@ Open it from the menu with **⌘,** (Genspark → Open Scripts Folder). The fold
 
 Scripts are read from disk on every injection, so a packaged app picks up edits without rebuilding.
 
+### Ready-made scripts
+
+[`examples/rename-to-laomao.js`](examples/rename-to-laomao.js) renames the Genspark brand to 老猫 throughout the page — visible text, the window title, and label attributes such as `placeholder` and `aria-label`. Code blocks, script bodies, and what you have typed into a field are left untouched. Copy it into the scripts folder to use it:
+
+```sh
+cp examples/rename-to-laomao.js ~/Library/Application\ Support/Genspark/scripts/
+```
+
 ## Shortcuts
 
 | Key | Action |
