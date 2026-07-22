@@ -47,7 +47,10 @@
     if (next !== document.title) document.title = next
   }
 
-  renameTree(document.body)
+  // This runs at document-start, so there is usually no <body> yet and almost
+  // nothing to walk. The observer below does the real work as the parser fills
+  // the document in, which is what keeps the original name off the screen.
+  renameTree(document.documentElement)
   renameTitle()
 
   // The site renders most of its content after load and rewrites the title on

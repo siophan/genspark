@@ -28,7 +28,8 @@ Scripts live in the app's user data folder:
 Open it from the menu with **⌘,** (Genspark → Open Scripts Folder). The folder is created on first launch with a commented `example.css` and `example.js`.
 
 - Every `*.css` file is injected into the page. **Saving takes effect immediately, without a reload.**
-- Every `*.js` file runs after the page loads, in the page's **main world** — `window` and the site's own globals are directly available. **Saving reloads the page.**
+- Every `*.js` file runs at **document-start** — before the page has parsed a single tag, and before the site's own scripts. That is what lets a script rewrite the page without the original content flashing up first. It runs in the page's **main world**, so `window` and the site's own globals are directly available. **Saving reloads the page.**
+- Because scripts run before `<body>` exists, do your work from a `MutationObserver` rather than assuming the DOM is there. See the example below.
 - Files are injected in filename order, so a `10-` / `20-` prefix controls sequence.
 - A script that throws is logged and skipped; it does not affect the page or the other scripts.
 
@@ -59,8 +60,11 @@ Links outside `genspark.ai` open in your default browser. The renderer keeps Ele
 ## Tests
 
 ```sh
-npm test              # unit tests, plain Node
-npm run test:integration   # injection against a real Electron page
+npm test             # unit tests, plain Node
+npm run test:early   # document-start injection in a real Electron page
+npm run test:rename  # the rename script against a real Electron page
 ```
 
-The unit tests cover path setup, script collection and injection, the file-watch debounce, window-state fallbacks, and internal/external URL classification. The integration run loads a real page in Electron and checks that injected CSS applies, that injected JS runs in the page's main world, and that editing or deleting a CSS file updates the page without a reload.
+The unit tests cover path setup, script collection, the file-watch debounce, window-state fallbacks, and internal/external URL classification.
+
+The integration runs load real pages in Electron. `test:early` proves the timing that matters: the user script runs before the page's own inline script, before `<body>` exists, and in the same world the page's scripts see — plus CSS hot-swapping without a reload. `test:rename` checks the rename script, including that the original name is never present in the parsed document.

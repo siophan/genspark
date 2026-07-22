@@ -1,7 +1,8 @@
+const path = require('node:path')
 const { app, shell, screen, BrowserWindow } = require('electron')
 
 const { scriptsDir, windowStateFile, ensureScriptDir } = require('./paths')
-const { createInjector } = require('./injector')
+const { serveScripts, pushCSS } = require('./script-bridge')
 const { watchScripts } = require('./watcher')
 const { loadState, trackWindow } = require('./window-state')
 const { buildMenu } = require('./menu')
@@ -26,6 +27,9 @@ function createWindow(dir) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Puts the user scripts in place at document-start, so the page is never
+      // painted before they have had their say.
+      preload: path.join(__dirname, 'preload.js'),
     },
   })
 
@@ -43,20 +47,15 @@ function createWindow(dir) {
     openExternally(url)
   })
 
-  const injector = createInjector(win.webContents, dir)
-  injector.attach()
-
+  // A stylesheet can be swapped in place; a script cannot be un-run, so the
+  // page is reloaded and the preload injects the new version at document-start.
   const watcher = watchScripts(dir, (exts) => {
     // A change can land while the window is on its way out.
     if (win.isDestroyed()) return
-    if (exts.has('js')) injector.reloadForJS()
-    else injector.reinjectCSS()
+    if (exts.has('js')) win.webContents.reload()
+    else pushCSS(win.webContents, dir)
   })
-  // Detach while the webContents is still alive.
-  win.on('close', () => {
-    watcher.close()
-    injector.dispose()
-  })
+  win.on('close', () => watcher.close())
 
   win.loadURL(HOME_URL)
   return win
@@ -65,6 +64,7 @@ function createWindow(dir) {
 app.whenReady().then(() => {
   const dir = scriptsDir(app.getPath('userData'))
   ensureScriptDir(dir)
+  serveScripts(dir)
 
   buildMenu({ onOpenScriptsDir: () => shell.openPath(dir) })
   createWindow(dir)

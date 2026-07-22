@@ -6,7 +6,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { app, BrowserWindow } = require('electron')
 
-const { createInjector } = require('../../src/injector')
+const { serveScripts } = require('../../src/script-bridge')
 
 const NEW_NAME = '老猫'
 
@@ -29,6 +29,11 @@ fs.writeFileSync(
       <code id="code">const genspark = require('genspark')</code>
       <script id="inline">window.__brand = 'Genspark'</script>
       <div id="later"></div>
+      <script id="witness">
+        // The parser has already produced the heading above. If the rename only
+        // happened after load, the original name would be visible right here.
+        window.__headingWhileParsing = document.getElementById('heading').textContent
+      </script>
     </body>
   </html>`,
 )
@@ -37,6 +42,10 @@ const checks = []
 const check = (name, fn) => checks.push({ name, fn })
 
 const read = (win, expr) => win.webContents.executeJavaScript(expr)
+
+check('the original name is never present in the parsed document', async (win) => {
+  assert.strictEqual(await read(win, 'window.__headingWhileParsing'), `Welcome to ${NEW_NAME}`)
+})
 
 check('visible text is renamed', async (win) => {
   assert.strictEqual(await read(win, 'document.getElementById("heading").textContent'), `Welcome to ${NEW_NAME}`)
@@ -91,8 +100,17 @@ check('text added later is renamed too', async (win) => {
 })
 
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({ show: false })
-  createInjector(win.webContents, dir).attach()
+  serveScripts(dir)
+
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, '../../src/preload.js'),
+    },
+  })
 
   const loaded = new Promise((resolve) => win.webContents.once('did-finish-load', resolve))
   win.loadFile(page)

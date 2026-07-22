@@ -22,22 +22,44 @@ main process (Node)
 ├── src/main.js          应用入口：生命周期、创建窗口、组装模块
 ├── src/window-state.js  窗口尺寸/位置持久化
 ├── src/menu.js          原生菜单与快捷键
-├── src/injector.js      读取脚本目录并注入到 webContents
+├── src/script-store.js  读取脚本目录，返回排序后的 css/js 内容
+├── src/script-bridge.js 主进程侧 IPC：同步供稿 + CSS 热更新推送
 ├── src/watcher.js       监听脚本目录变化，触发重新注入
 └── src/paths.js         用户数据目录与脚本目录的路径解析、首启初始化
+
+renderer process
+└── src/preload.js       document-start 注入 CSS 与 JS
 ```
 
 模块之间只通过函数参数通信，没有共享可变状态。`main.js` 是唯一知道全部模块的地方。
+
+### 注入时机（2026-07-22 修订）
+
+初版在 `did-finish-load` 注入，导致站点原有内容先渲染、随后才被脚本改写，肉眼可见闪烁。现改为 **document-start**：
+
+- preload 在页面解析任何标签之前运行，用 `ipcRenderer.sendSync` 同步取回脚本内容。同步是必要的——内容必须在解析器产出任何东西之前到手。
+- preload 运行时 `document.documentElement` 尚不存在（`readyState === 'loading'`），直接操作会抛错。用 `MutationObserver` 观察 `document` 节点的 `childList`，根元素一出现立即注入。
+- JS 通过创建 `<script>` 标签注入，因此仍运行在页面**主世界**，保留访问站点全局变量的能力。实测 genspark.ai 的 CSP 只声明 `frame-ancestors`，不拦截脚本。
+- CSS 注入为 `<style>` 元素而非 `webContents.insertCSS`，这样热更新可以直接改写其内容。
 
 ### 数据流
 
 ```
 app ready
   → paths.ensureScriptDir()        创建目录 + 首启写入示例脚本
+  → scriptBridge.serveScripts(dir) 注册同步 IPC 供稿
   → windowState.load()             读取上次窗口几何
-  → createWindow()                 BrowserWindow 加载 genspark.ai
-  → injector.attach(webContents)   监听 did-finish-load，每次加载完成后注入
-  → watcher.watch(dir, onChange)   目录变化 → 防抖 → injector.reinject()
+  → createWindow()                 BrowserWindow（挂 preload）加载 genspark.ai
+
+document-start（渲染进程）
+  → preload sendSync 取回脚本
+  → 等 documentElement 出现
+  → 注入 <style> 与 <script>
+
+脚本目录变化
+  → watcher 防抖
+  → css 变化 → scriptBridge.pushCSS() → preload 改写 <style>（不刷新）
+  → js  变化 → webContents.reload() → 重走 document-start 注入
 ```
 
 ## 组件契约
@@ -52,30 +74,33 @@ app ready
 
 依赖：`electron.app`、`node:fs`、`node:path`。
 
-### `src/injector.js`
+### `src/script-store.js`
 
-工厂函数 `createInjector(webContents)`，返回：
+`collectScripts(dir)` 返回 `{css: [{name, source}], js: [...]}`，各组按文件名字典序排序，注入顺序稳定可预期。目录缺失或文件读取失败时跳过并记日志，不抛错。
 
-| 方法 | 说明 |
+### `src/script-bridge.js`（主进程）
+
+| 导出 | 说明 |
 | --- | --- |
-| `attach()` | 绑定 `did-finish-load`，每次页面加载完成后执行一次全量注入。 |
-| `reinjectCSS()` | 卸载已注入的全部 CSS（`removeInsertedCSS`，按保存的 key），重新读取并注入。页面不刷新。 |
-| `reloadForJS()` | 调用 `webContents.reload()`；页面重新加载会触发 `did-finish-load`，走全量注入路径。 |
-| `dispose()` | 解绑监听。 |
+| `serveScripts(dir)` | 注册同步 IPC handler，preload 请求时立即返回 `collectScripts(dir)`。重复调用会先清掉旧 handler。 |
+| `pushCSS(webContents, dir)` | 把当前样式表推给已加载的页面，用于免刷新热更新。webContents 已销毁时静默返回。 |
+
+### `src/preload.js`（渲染进程，document-start）
+
+沙箱化 preload 无法 require 项目文件，因此 IPC 频道名在此与 `script-bridge.js` 手工保持一致。
 
 注入规则：
 
-- 读取脚本目录下所有 `*.css` 与 `*.js`，各自按文件名字典序排序后依次注入，顺序稳定可预期。
-- CSS 通过 `webContents.insertCSS(source)`，保存返回的 key 以便卸载。
-- JS 通过 `webContents.executeJavaScript(source, true)`，运行在页面**主世界**，可访问站点的 `window` 和全局变量。
-- 每个 JS 文件的执行独立 try/catch 包裹；单个脚本抛错只在主进程 `console.error` 中记录文件名与错误，不影响其他脚本，也不影响页面。
+- CSS 合并进单个 `<style id="genspark-shell-user-css">`，追加到 `documentElement` 末尾；热更新时改写其 `textContent`。
+- JS 逐个通过 `<script>` 元素注入，运行在页面**主世界**，可访问站点的 `window` 和全局变量；注入后立即移除元素。
+- 每个 JS 文件的注入独立 try/catch 包裹；单个脚本失败只记录文件名，不影响其他脚本与页面。
 - 目录为空时注入是无操作，不报错。
 
 ### `src/watcher.js`
 
 `watchScripts(dir, onChange)`：`fs.watch` 递归关闭（只看一层），150ms 防抖，回调参数为变化文件的扩展名集合。返回 `close()`。
 
-`main.js` 中的分派逻辑：变化只涉及 `.css` → `reinjectCSS()`；涉及 `.js` → `reloadForJS()`。
+`main.js` 中的分派逻辑：变化只涉及 `.css` → `pushCSS()`；涉及 `.js` → `webContents.reload()`。
 
 ### `src/window-state.js`
 
