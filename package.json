@@ -8,11 +8,13 @@
   "type": "commonjs",
   "scripts": {
     "start": "electron .",
+    "restart": "bash restart.sh",
     "test": "node --test 'test/*.test.js'",
     "dist": "electron-builder --mac",
     "test:rename": "electron test/integration/rename.js",
     "test:early": "electron test/integration/early-inject.js",
-    "test:popup": "electron test/integration/popup.js"
+    "test:popup": "electron test/integration/popup.js",
+    "test:flicker": "electron test/integration/flicker.js"
   },
   "devDependencies": {
     "electron": "43.0.0",
