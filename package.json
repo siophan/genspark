@@ -11,7 +11,8 @@
     "test": "node --test 'test/*.test.js'",
     "dist": "electron-builder --mac",
     "test:rename": "electron test/integration/rename.js",
-    "test:early": "electron test/integration/early-inject.js"
+    "test:early": "electron test/integration/early-inject.js",
+    "test:popup": "electron test/integration/popup.js"
   },
   "devDependencies": {
     "electron": "43.0.0",

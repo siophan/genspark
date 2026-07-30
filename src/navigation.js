@@ -22,4 +22,30 @@ function isInternal(url) {
   return hostname === ALLOWED_HOST || hostname.endsWith(`.${ALLOWED_HOST}`)
 }
 
-module.exports = { HOME_URL, ALLOWED_HOST, isInternal, isBrowsable }
+// A popup opened by the page does not inherit the parent's webPreferences, so
+// they have to be restated here — otherwise the user scripts never run in it
+// and the window keeps the site's own appearance.
+const RENDERER_PREFERENCES = {
+  contextIsolation: true,
+  nodeIntegration: false,
+  sandbox: true,
+}
+
+function decideWindowOpen(url, preloadPath) {
+  if (!isInternal(url)) return { action: 'deny' }
+  return {
+    action: 'allow',
+    overrideBrowserWindowOptions: {
+      webPreferences: { ...RENDERER_PREFERENCES, preload: preloadPath },
+    },
+  }
+}
+
+module.exports = {
+  HOME_URL,
+  ALLOWED_HOST,
+  RENDERER_PREFERENCES,
+  isInternal,
+  isBrowsable,
+  decideWindowOpen,
+}

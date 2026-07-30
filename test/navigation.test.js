@@ -40,3 +40,34 @@ test('only http urls may be handed to the system browser', () => {
   assert.strictEqual(isBrowsable('javascript:alert(1)'), false)
   assert.strictEqual(isBrowsable('not a url'), false)
 })
+
+test('an in-site popup is allowed and keeps the preload', () => {
+  const { decideWindowOpen } = require('../src/navigation')
+
+  const decision = decideWindowOpen('https://www.genspark.ai/zh-cn', '/path/to/preload.js')
+
+  assert.strictEqual(decision.action, 'allow')
+  // A popup does not inherit webPreferences, so the preload must be restated
+  // or the user scripts never run in it.
+  assert.strictEqual(
+    decision.overrideBrowserWindowOptions.webPreferences.preload,
+    '/path/to/preload.js',
+  )
+})
+
+test('a popup keeps the renderer sandboxed', () => {
+  const { decideWindowOpen } = require('../src/navigation')
+
+  const { webPreferences } = decideWindowOpen('https://www.genspark.ai/x', '/p.js')
+    .overrideBrowserWindowOptions
+
+  assert.strictEqual(webPreferences.contextIsolation, true)
+  assert.strictEqual(webPreferences.nodeIntegration, false)
+  assert.strictEqual(webPreferences.sandbox, true)
+})
+
+test('an off-site popup is denied', () => {
+  const { decideWindowOpen } = require('../src/navigation')
+
+  assert.deepStrictEqual(decideWindowOpen('https://example.com/', '/p.js'), { action: 'deny' })
+})

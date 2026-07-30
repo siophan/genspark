@@ -6,7 +6,15 @@ const { serveScripts, pushCSS } = require('./script-bridge')
 const { watchScripts } = require('./watcher')
 const { loadState, trackWindow } = require('./window-state')
 const { buildMenu } = require('./menu')
-const { HOME_URL, isInternal, isBrowsable } = require('./navigation')
+const {
+  HOME_URL,
+  RENDERER_PREFERENCES,
+  isInternal,
+  isBrowsable,
+  decideWindowOpen,
+} = require('./navigation')
+
+const PRELOAD = path.join(__dirname, 'preload.js')
 
 // Fixes the user data folder to ~/Library/Application Support/Genspark, so the
 // scripts live in the same place when run from source and when packaged.
@@ -23,23 +31,18 @@ function createWindow(dir) {
   const win = new BrowserWindow({
     ...state,
     title: 'Genspark',
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      // Puts the user scripts in place at document-start, so the page is never
-      // painted before they have had their say.
-      preload: path.join(__dirname, 'preload.js'),
-    },
+    // The preload puts the user scripts in place at document-start, so the page
+    // is never painted before they have had their say.
+    webPreferences: { ...RENDERER_PREFERENCES, preload: PRELOAD },
   })
 
   trackWindow(win, windowStateFile(app.getPath('userData')))
 
   // Anything outside the site belongs in the user's own browser.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isInternal(url)) return { action: 'allow' }
-    openExternally(url)
-    return { action: 'deny' }
+    const decision = decideWindowOpen(url, PRELOAD)
+    if (decision.action === 'deny') openExternally(url)
+    return decision
   })
   win.webContents.on('will-navigate', (event, url) => {
     if (isInternal(url)) return
