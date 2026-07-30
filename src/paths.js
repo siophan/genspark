@@ -1,22 +1,10 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXAMPLE_CSS = `/* Genspark shell — custom styles.
- * Every .css file in this folder is injected into the page.
- * Saving a change takes effect immediately, without reloading. */
-
-/* body { filter: hue-rotate(15deg); } */
-`
-
-const EXAMPLE_JS = `// Genspark shell — custom script.
-// Every .js file in this folder runs in the page's main world after load,
-// so window and the site's globals are directly available.
-// Saving a change reloads the page.
-
-// console.log('hello from example.js', document.title)
-`
-
-const EXAMPLES = { 'example.css': EXAMPLE_CSS, 'example.js': EXAMPLE_JS }
+// The default scripts shipped with the app. Copied into the user's scripts
+// folder on first run, so a fresh install rebrands itself out of the box while
+// staying fully editable afterwards. Bundled via the "seed/**" files entry.
+const SEED_DIR = path.join(__dirname, '..', 'seed')
 
 function scriptsDir(userDataDir) {
   return path.join(userDataDir, 'scripts')
@@ -26,8 +14,8 @@ function windowStateFile(userDataDir) {
   return path.join(userDataDir, 'window-state.json')
 }
 
-// Creates the scripts folder and seeds it with examples the first time only.
-// Returns false if the folder could not be created.
+// Creates the scripts folder and seeds it with the bundled default scripts the
+// first time only. Returns false if the folder could not be created.
 function ensureScriptDir(dir) {
   if (fs.existsSync(dir)) return true
 
@@ -38,8 +26,10 @@ function ensureScriptDir(dir) {
     return false
   }
 
-  for (const [name, body] of Object.entries(EXAMPLES)) {
-    fs.writeFileSync(path.join(dir, name), body)
+  // Byte-for-byte copy so scripts survive intact (readFileSync also reads from
+  // inside the packaged asar, writeFileSync lands in the real user data dir).
+  for (const name of fs.readdirSync(SEED_DIR)) {
+    fs.writeFileSync(path.join(dir, name), fs.readFileSync(path.join(SEED_DIR, name)))
   }
   return true
 }

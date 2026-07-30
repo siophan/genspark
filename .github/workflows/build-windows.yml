@@ -1,0 +1,39 @@
+name: Build Windows
+
+# Builds the Windows installer (.exe) and a portable .exe on a Windows runner,
+# since electron-builder cannot produce them on macOS without Wine. Runs on
+# every push to main and can be started by hand from the Actions tab.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The committed .npmrc points at a China mirror that is slow/flaky from
+      # GitHub's runners; use the official registry (and default Electron
+      # download host) for the CI build instead.
+      - name: Use the official npm registry for CI
+        shell: bash
+        run: printf 'registry=https://registry.npmjs.org/\n' > .npmrc
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Windows package
+        run: npx electron-builder --win --publish never
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: laomao-windows
+          path: dist/*.exe
+          if-no-files-found: error

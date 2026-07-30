@@ -3,6 +3,7 @@ const { Menu, app } = require('electron')
 // The standard edit/window items must stay: without them the page loses the
 // system copy/paste and window shortcuts.
 function buildMenu({ onOpenScriptsDir }) {
+  const isMac = process.platform === 'darwin'
   const template = [
     {
       label: app.name,
@@ -15,12 +16,18 @@ function buildMenu({ onOpenScriptsDir }) {
           click: onOpenScriptsDir,
         },
         { type: 'separator' },
-        { role: 'services' },
-        { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
-        { role: 'unhide' },
-        { type: 'separator' },
+        // hide/services/unhide are macOS-only roles; on Windows and Linux they
+        // do not apply, so the app menu there is just About / Scripts / Quit.
+        ...(isMac
+          ? [
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+            ]
+          : []),
         { role: 'quit' },
       ],
     },
