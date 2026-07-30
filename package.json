@@ -38,7 +38,11 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "perMachine": false
+      "perMachine": false,
+      "artifactName": "laomao-${version}-setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "laomao-${version}-portable.${ext}"
     },
     "mac": {
       "target": [
