@@ -8,6 +8,10 @@ on:
   push:
     branches: [main]
 
+# Needed to publish the built .exe files as Release assets.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -31,9 +35,15 @@ jobs:
       - name: Build Windows package
         run: npx electron-builder --win --publish never
 
-      - name: Upload installers
-        uses: actions/upload-artifact@v4
-        with:
-          name: laomao-windows
-          path: dist/*.exe
-          if-no-files-found: error
+      # Publish to a Release rather than an artifact: Release assets do not
+      # count against the (limited) Actions artifact storage quota, and are
+      # easier to download.
+      - name: Publish Windows build to a Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="win-${{ github.run_id }}"
+          gh release create "$tag" dist/*.exe \
+            --title "老猫 Windows (build ${{ github.run_number }})" \
+            --notes "Automated Windows build from commit ${{ github.sha }}."
