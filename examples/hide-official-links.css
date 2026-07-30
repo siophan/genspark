@@ -1,0 +1,29 @@
+/* Hides links that lead to the official Genspark site and its branded off-site
+ * presence. The homepage keeps all of these in a single <footer> (social,
+ * app stores, sibling products, blog/terms/tools, language switcher), so
+ * hiding that footer clears them in one move.
+ *
+ * Injected last with !important by the shell, so it overrides the page styles.
+ */
+
+/* The whole marketing footer. */
+footer {
+  display: none !important;
+}
+
+/* Belt and suspenders: the external branded links by destination, in case any
+ * of them also appear outside the footer (e.g. a header on another route). */
+a[href*="x.com/genspark"],
+a[href*="linkedin.com/company/gensparkai"],
+a[href*="instagram.com/genspark"],
+a[href*="youtube.com/@Genspark"],
+a[href*="tiktok.com/@genspark"],
+a[href*="discord.com/invite/CsAQ6F4MPy"],
+a[href*="speakly.ai"],
+a[href*="genclipboard.ai"],
+a[href*="genterminal.ai"],
+a[href*="apps.apple.com/us/app/id6739554054"],
+a[href*="ai.mainfunc.genspark"],
+a[href^="mailto:press@genspark.ai"] {
+  display: none !important;
+}
