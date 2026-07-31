@@ -27,3 +27,19 @@ a[href*="ai.mainfunc.genspark"],
 a[href^="mailto:press@genspark.ai"] {
   display: none !important;
 }
+
+/* The sign-in screen is Microsoft Azure AD B2C, hosted on login.genspark.ai.
+ * It shows the Genspark wordmark as an <img> with empty alt text, which the
+ * text-only rename script cannot reach. The B2C branding assets are served
+ * from a path used nowhere else on the site, so hiding them by src is safe for
+ * the rest of the app. The 老猫 name is dropped back into the logo slot. */
+img[src*="/api/assets/adb2c/"] {
+  display: none !important;
+}
+.header .left .logo::after {
+  content: "老猫";
+  font-size: 20px;
+  font-weight: 700;
+  color: #000;
+  white-space: nowrap;
+}
