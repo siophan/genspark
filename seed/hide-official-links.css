@@ -43,3 +43,19 @@ img[src*="/api/assets/adb2c/"] {
   color: #000;
   white-space: nowrap;
 }
+
+/* Content pages (privacy, terms, etc.) draw the Genspark wordmark as an inline
+ * SVG — the letters are vector paths, not text, so the rename script cannot
+ * reach them (it does rename the link's aria-label, but not the picture). The
+ * wordmark SVG has a fixed 122×28 viewBox unique to it; hide it and drop the
+ * 老猫 name into the logo link via :has(). */
+svg[viewBox="0 0 122 28"] {
+  display: none !important;
+}
+a:has(> svg[viewBox="0 0 122 28"])::after {
+  content: "老猫";
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-text-primary, #000);
+  white-space: nowrap;
+}
