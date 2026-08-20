@@ -37,4 +37,7 @@ test('buildLoginScript includes the branded loading overlay', () => {
   assert.ok(src.includes('老猫'))
   assert.ok(src.includes('position:fixed'))
   assert.ok(src.includes('@keyframes gsspin'))
+  // timeout reveal must not mark the session as logged-in
+  assert.ok(src.includes('__gsAutoLoginLoggedIn'))
+  assert.ok(src.includes('__gsAutoLoginSubmitted'))
 })
