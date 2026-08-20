@@ -30,3 +30,11 @@ test('buildLoginScript targets the verified genspark login elements', () => {
   assert.ok(src.includes('更多选项'))
   assert.ok(src.includes('登'))
 })
+
+test('buildLoginScript includes the branded loading overlay', () => {
+  const src = buildLoginScript('a@x.com', 'p')
+  assert.ok(src.includes('gs-auto-login-overlay'))
+  assert.ok(src.includes('老猫'))
+  assert.ok(src.includes('position:fixed'))
+  assert.ok(src.includes('@keyframes gsspin'))
+})
