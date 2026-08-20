@@ -18,3 +18,15 @@ test('buildLoginScript references the B2C form fields it will fill', () => {
   assert.ok(src.includes("input[type=password]"))
   assert.ok(src.includes('login.genspark.ai'))
 })
+
+test('buildLoginScript targets the verified genspark login elements', () => {
+  const src = buildLoginScript('a@x.com', 'p')
+  // B2C form fields and the real submit button
+  assert.ok(src.includes('#email'))
+  assert.ok(src.includes('#password'))
+  assert.ok(src.includes('#next'))
+  assert.ok(src.includes('#loginWithEmailWrapper'))
+  // landing-page modal steps (styled div/span, matched by text)
+  assert.ok(src.includes('更多选项'))
+  assert.ok(src.includes('登'))
+})

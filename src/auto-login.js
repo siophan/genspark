@@ -6,13 +6,23 @@
 // it either clicks the sign-in entry (landing page) or fills the Azure AD B2C
 // form on login.genspark.ai and submits.
 //
-// NOTE: selectors are a best-effort first pass. Task 6 verifies them against
-// the live DOM and tightens them if needed.
+// NOTE: selectors are DOM-verified against the live genspark.ai login flow
+// (landing-page modal trigger + "更多选项" step, then the login.genspark.ai
+// Azure B2C form). See loginContentMain for the details captured from
+// observation.
 function loginContentMain(email, password) {
   var DONE = '__gsAutoLoginFilled'
-  var ENTERED = '__gsAutoLoginEntered'
+  var OPENED = '__gsAutoLoginOpened'
+  var MORE = '__gsAutoLoginMore'
 
   function q(sel) { return document.querySelector(sel) }
+
+  function vis(el) {
+    if (!el) return false
+    var r = el.getBoundingClientRect()
+    var s = getComputedStyle(el)
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'
+  }
 
   function setValue(el, value) {
     var desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')
@@ -22,24 +32,54 @@ function loginContentMain(email, password) {
     el.dispatchEvent(new Event('change', { bubbles: true }))
   }
 
+  // The sign-in entry and "more options" are styled <div>/<span>, not links or
+  // buttons, so the search cannot be limited to a,button. Match a leaf element
+  // whose entire trimmed text equals the label, and click it (or its nearest
+  // clickable ancestor).
+  function clickByText(re) {
+    var els = document.querySelectorAll('a,button,div,span')
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i]
+      if (el.children.length) continue
+      if (!re.test((el.textContent || '').trim())) continue
+      if (!vis(el)) continue
+      ;(el.closest('button') || el.closest('a') || el).click()
+      return true
+    }
+    return false
+  }
+
   function fillB2C() {
-    var emailEl = q('input[type=email]') || q('#email') || q('#signInName') || q('input[name=Email]')
-    var passEl = q('input[type=password]') || q('#password') || q('input[name=Password]')
+    var emailEl = q('#email') || q('input[type=email]') || q('#signInName')
+    var passEl = q('#password') || q('input[type=password]')
     if (!emailEl || !passEl) return false
+    // The local-account form can be collapsed behind a "Login with email"
+    // toggle; reveal it before filling if the fields are not visible yet.
+    if (!vis(emailEl)) {
+      var toggle = q('#loginWithEmailWrapper')
+      if (toggle) { toggle.click(); return false }
+    }
     setValue(emailEl, email)
     setValue(passEl, password)
-    var submit = q('button[type=submit]') || q('#next') || q('#continue') || q('#submit')
+    // #next is the real "Sign in"; the first button[type=submit] is the
+    // unrelated "Login with email", so it is the last resort only.
+    var submit = q('#next') || q('#continue') || q('#submit') ||
+      q('#localAccountForm button[type=submit]') || q('button[type=submit]')
     if (submit) submit.click()
     return true
   }
 
   function enterLogin() {
-    if (window[ENTERED]) return
-    var els = Array.prototype.slice.call(document.querySelectorAll('a,button'))
-    var hit = els.find(function (el) {
-      return /^(sign ?in|log ?in|登\s*录)$/i.test((el.textContent || '').trim())
-    })
-    if (hit) { window[ENTERED] = true; hit.click() }
+    // Once the modal is open, "更多选项" leads to the email/password path on
+    // login.genspark.ai. Try it first; it only exists after the modal opens.
+    if (!window[MORE] && clickByText(/^(更多选项|more options)$/i)) {
+      window[MORE] = true
+      return
+    }
+    // Open the sign-in modal exactly once, so repeated observer ticks do not
+    // toggle it shut again.
+    if (window[OPENED]) return
+    if (clickByText(/^(登\s*录|sign\s?in|log\s?in)$/i)) window[OPENED] = true
   }
 
   var obs
@@ -47,7 +87,7 @@ function loginContentMain(email, password) {
   function tick() {
     if (window[DONE]) { if (obs) obs.disconnect(); return }
     if (location.hostname === 'login.genspark.ai') {
-      if (fillB2C()) window[DONE] = true
+      if (fillB2C()) { window[DONE] = true; if (obs) obs.disconnect() }
     } else if (location.hostname.endsWith('genspark.ai')) {
       enterLogin()
     }
@@ -56,7 +96,7 @@ function loginContentMain(email, password) {
   obs = new MutationObserver(tick)
   obs.observe(document.documentElement, { childList: true, subtree: true })
   tick()
-  setTimeout(function () { obs.disconnect() }, 15000)
+  setTimeout(function () { if (obs) obs.disconnect() }, 15000)
 }
 
 function buildLoginScript(email, password) {
