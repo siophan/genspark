@@ -42,8 +42,10 @@ function loginContentMain(email, password) {
     if (hit) { window[ENTERED] = true; hit.click() }
   }
 
+  var obs
+
   function tick() {
-    if (window[DONE]) return
+    if (window[DONE]) { if (obs) obs.disconnect(); return }
     if (location.hostname === 'login.genspark.ai') {
       if (fillB2C()) window[DONE] = true
     } else if (location.hostname.endsWith('genspark.ai')) {
@@ -51,7 +53,7 @@ function loginContentMain(email, password) {
     }
   }
 
-  var obs = new MutationObserver(tick)
+  obs = new MutationObserver(tick)
   obs.observe(document.documentElement, { childList: true, subtree: true })
   tick()
   setTimeout(function () { obs.disconnect() }, 15000)

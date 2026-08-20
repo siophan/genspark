@@ -82,8 +82,9 @@ function createWindow(dir, account) {
   })
 
   if (account) {
-    registerLoginScript(win.webContents.id, account.loginScript)
-    win.webContents.on('destroyed', () => clearLoginScript(win.webContents.id))
+    const wcId = win.webContents.id
+    registerLoginScript(wcId, account.loginScript)
+    win.webContents.on('destroyed', () => clearLoginScript(wcId))
   }
 
   trackWindow(win, windowStateFile(app.getPath('userData')))
