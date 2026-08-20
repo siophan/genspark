@@ -15,6 +15,12 @@ const {
   isBrowsable,
   decideWindowOpen,
 } = require('./navigation')
+const {
+  accountsFile, ensureAccountsFile, loadAccounts, realAccounts,
+  pickAccount, partitionName, lastAccountFile, readLastEmail, writeLastEmail,
+} = require('./accounts')
+const { buildLoginScript } = require('./auto-login')
+const { serveAccount, registerLoginScript, clearLoginScript } = require('./account-bridge')
 
 const PRELOAD = path.join(__dirname, 'preload.js')
 
@@ -30,7 +36,36 @@ function openExternally(url) {
   if (isBrowsable(url)) shell.openExternal(url)
 }
 
-function createWindow(dir) {
+// Reads the desktop pool (seeding a template on first run), picks a random
+// account for this launch, and returns what the window needs: a stable
+// per-account session partition plus the login script to inject. Returns null
+// when there is no usable account, in which case the window opens normally
+// with no auto-login.
+function chooseAccount() {
+  const userData = app.getPath('userData')
+  const file = accountsFile(app.getPath('desktop'))
+  ensureAccountsFile(file)
+
+  const { avoidRepeatLast, accounts } = loadAccounts(file)
+  const real = realAccounts(accounts)
+  if (!real.length) return null
+
+  const lastFile = lastAccountFile(userData)
+  const account = pickAccount(real, {
+    lastEmail: readLastEmail(lastFile),
+    avoidRepeatLast,
+  })
+  if (!account) return null
+
+  writeLastEmail(lastFile, account.email)
+  return {
+    email: account.email,
+    partition: partitionName(account.email),
+    loginScript: buildLoginScript(account.email, account.password),
+  }
+}
+
+function createWindow(dir, account) {
   const displays = screen.getAllDisplays().map((d) => d.workArea)
   const state = loadState(windowStateFile(app.getPath('userData')), displays)
 
@@ -39,8 +74,17 @@ function createWindow(dir) {
     title: DISPLAY_NAME,
     // The preload puts the user scripts in place at document-start, so the page
     // is never painted before they have had their say.
-    webPreferences: { ...RENDERER_PREFERENCES, preload: PRELOAD },
+    webPreferences: {
+      ...RENDERER_PREFERENCES,
+      preload: PRELOAD,
+      ...(account ? { partition: account.partition } : {}),
+    },
   })
+
+  if (account) {
+    registerLoginScript(win.webContents.id, account.loginScript)
+    win.webContents.on('destroyed', () => clearLoginScript(win.webContents.id))
+  }
 
   trackWindow(win, windowStateFile(app.getPath('userData')))
 
@@ -74,16 +118,17 @@ app.whenReady().then(() => {
   const dir = scriptsDir(app.getPath('userData'))
   ensureScriptDir(dir)
   serveScripts(dir)
+  serveAccount()
 
   // Every window, including popups, keeps the original brand out of its title
   // bar. Registered before the first window is created so it catches it too.
   app.on('browser-window-created', (_event, win) => guardWindowTitle(win))
 
   buildMenu({ onOpenScriptsDir: () => shell.openPath(dir) })
-  createWindow(dir)
+  createWindow(dir, chooseAccount())
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(dir)
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(dir, chooseAccount())
   })
 })
 
