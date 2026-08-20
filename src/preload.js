@@ -11,6 +11,9 @@ const CSS_UPDATE = 'genspark-shell:scripts:css'
 const STYLE_ID = 'genspark-shell-user-css'
 const GUARD_ID = 'genspark-shell-anti-flicker'
 
+// Duplicated from account-bridge.js (sandboxed preload cannot require it).
+const ACCOUNT_REQUEST = 'genspark-shell:account:request'
+
 // If a user script never lets go, the page must still appear. This caps how
 // long it can stay hidden waiting for a reveal that may never be scheduled.
 const REVEAL_TIMEOUT_MS = 3000
@@ -18,6 +21,11 @@ const REVEAL_TIMEOUT_MS = 3000
 // Synchronous on purpose: the scripts have to be in hand before the parser
 // produces anything worth rewriting.
 const scripts = ipcRenderer.sendSync(REQUEST)
+
+// The main process assigns this window's account; if present, its login
+// script is injected alongside the user scripts. null when auto-login is off
+// (no pool / already logged in yields no fillable form and the script no-ops).
+const account = ipcRenderer.sendSync(ACCOUNT_REQUEST)
 
 // document.documentElement does not exist yet when a preload runs, but the
 // document node does, so watch it for the root element appearing.
@@ -105,6 +113,9 @@ whenRootExists(() => {
   // CSS applies at document-start and never shows the wrong thing.
   if (scripts.js.length) hideUntilSettled()
   runJS(scripts.js)
+  if (account?.loginScript) {
+    runJS([{ name: 'auto-login', source: account.loginScript }])
+  }
 })
 
 ipcRenderer.on(CSS_UPDATE, (_event, files) => whenRootExists(() => applyCSS(files)))
