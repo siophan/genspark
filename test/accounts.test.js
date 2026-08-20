@@ -57,3 +57,43 @@ test('example accounts are recognised and filtered out', () => {
   const mixed = [tmpl.accounts[0], { email: 'real@x.com', password: 'p' }, { email: '', password: '' }]
   assert.deepStrictEqual(realAccounts(mixed), [{ email: 'real@x.com', password: 'p' }])
 })
+
+const {
+  partitionName, pickAccount, lastAccountFile, readLastEmail, writeLastEmail,
+} = require('../src/accounts')
+
+test('partitionName is stable and namespaced per email', () => {
+  assert.match(partitionName('a@x.com'), /^persist:acct-[0-9a-f]{12}$/)
+  assert.strictEqual(partitionName('a@x.com'), partitionName('a@x.com'))
+  assert.notStrictEqual(partitionName('a@x.com'), partitionName('b@x.com'))
+})
+
+test('pickAccount returns null for an empty pool', () => {
+  assert.strictEqual(pickAccount([], {}), null)
+})
+
+test('pickAccount uses the injected random to index', () => {
+  const pool = [{ email: 'a@x.com', password: '1' }, { email: 'b@x.com', password: '2' }]
+  assert.strictEqual(pickAccount(pool, { random: () => 0 }).email, 'a@x.com')
+  assert.strictEqual(pickAccount(pool, { random: () => 0.99 }).email, 'b@x.com')
+})
+
+test('avoidRepeatLast skips the previous account when possible', () => {
+  const pool = [{ email: 'a@x.com', password: '1' }, { email: 'b@x.com', password: '2' }]
+  // random()=0 would pick index 0 of the *filtered* pool (only b), so b is chosen
+  const chosen = pickAccount(pool, { lastEmail: 'a@x.com', avoidRepeatLast: true, random: () => 0 })
+  assert.strictEqual(chosen.email, 'b@x.com')
+})
+
+test('avoidRepeatLast falls back when only the last account remains', () => {
+  const pool = [{ email: 'a@x.com', password: '1' }]
+  const chosen = pickAccount(pool, { lastEmail: 'a@x.com', avoidRepeatLast: true, random: () => 0 })
+  assert.strictEqual(chosen.email, 'a@x.com')
+})
+
+test('last email round-trips through its file', () => {
+  const file = path.join(tmpdir(), 'last-account.json')
+  assert.strictEqual(readLastEmail(file), null)
+  writeLastEmail(file, 'a@x.com')
+  assert.strictEqual(readLastEmail(file), 'a@x.com')
+})
