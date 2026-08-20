@@ -110,6 +110,7 @@ function loginContentMain(email, password) {
 
   function finish(loggedIn) {
     hideOverlay()
+    ssDel(K_SUBMITTED)
     if (loggedIn) ssSet(K_LOGGEDIN, '1')
     if (obs) obs.disconnect()
     if (poll) clearInterval(poll)
