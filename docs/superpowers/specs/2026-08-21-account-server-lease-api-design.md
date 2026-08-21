@@ -60,10 +60,10 @@ server/
     api.js        # 路由:/api/lease /renew /release
     admin.js      # 管理页路由 + 管理员登录
     db.js         # D1 查询封装(prepared statements)
-  test/           # 纯逻辑用 node:test;涉及 D1 的用 miniflare(本地 D1)
+  test/           # node:test;涉及 D1 的用 node:sqlite + 一层薄 D1 shim
   schema.sql      # 建表语句(wrangler d1 migrations 用)
   wrangler.toml   # Worker 配置 + D1 binding + secrets 声明
-  package.json    # 服务端独立依赖(hono、wrangler、miniflare)
+  package.json    # 服务端独立依赖(hono、wrangler)
 ```
 
 - 运行时:Cloudflare Workers + Hono(轻量路由)+ D1(SQLite)。
@@ -199,21 +199,26 @@ token 校验:`sha256(token)` 命中 `clients.token_hash` 且 `enabled=1`,并更�
 - 客户端 `account-source.js`:配置读取兜底、lease 成功映射到老结构、失败回落链
   (缓存 → 桌面文件 → null)。用可注入的 fetch/fs 做纯测试。
 
-集成测试(少量,用 miniflare 起本地 Worker + 本地 D1):lease → renew → release → 再
-lease 全流程;并发两次 lease 不撞号(验证条件写)。
+集成测试(少量):Hono 的 `app.request()` 直接打真实的 `index.js`,不需要 workerd;
+涉及 D1 的用 Node 内置 `node:sqlite` 加一层薄 shim(D1 底层就是 SQLite)。覆盖
+lease → renew → release → 再 lease 全流程;并发两次 lease 不撞号(验证条件写)。
+
+原计划用 miniflare,但它依赖的 workerd 原生二进制从镜像装下来没有代码签名,
+Apple Silicon 会直接 SIGKILL,所以改成上面这套零额外依赖的方案。`db.js`、
+`schema.sql`、`wrangler.toml` 都是生产用的真 D1 产物,没有为了可测性改过。
 
 ## 部署(Cloudflare)
 
-1. `cd server && npm ci`(装 wrangler、hono、miniflare)。
-2. `wrangler login`(一次性授权)。
-3. 建 D1:`wrangler d1 create genspark-accounts`,把返回的 database_id 写进
+1. `cd server && npm ci`(装 wrangler、hono)。
+2. `npx wrangler login`(一次性授权)。
+3. 建 D1:`npx wrangler d1 create genspark-accounts`,把返回的 database_id 写进
    `wrangler.toml` 的 D1 binding。
 4. 建表:`npx wrangler d1 execute genspark-accounts --remote --file schema.sql`。
    两个细节都会决定成败:第 1 步已经 `cd server`,所以路径是 `schema.sql` 而不是
    `server/schema.sql`;`--remote` 也不能省 —— wrangler v3 的 `d1 execute` 默认打
    在**本地模拟库**上,漏掉它表就只建在本地,线上 Worker 每个 API 调用都 500,而
    客户端会静默回落到缓存/桌面文件,表现成"配置好了但从来没生效"。
-5. 塞 secrets:`wrangler secret put ACCOUNT_ENC_KEY`、`wrangler secret put ADMIN_PASSWORD_HASH`。
+5. 塞 secrets:`npx wrangler secret put ACCOUNT_ENC_KEY`、`npx wrangler secret put ADMIN_PASSWORD_HASH`。
    两个值都要自己先生成好,命令只是把它贴进去:
 
    - `ACCOUNT_ENC_KEY`:32 字节随机数的 base64(AES-256-GCM 的密钥)。
@@ -225,7 +230,7 @@ lease 全流程;并发两次 lease 不撞号(验证条件写)。
    管理员密码请用一长串随机字符串。`ADMIN_PASSWORD_HASH` 是无盐、单轮的 sha256,
    而且它同时被当作后台 cookie 的签名密钥 —— 一个能被猜到或被跑字典的弱密码,
    等于把后台和 cookie 一起交出去。
-6. 部署:`wrangler deploy`。得到 `https://<name>.<account>.workers.dev`(或绑自有域名)。
+6. 部署:`npx wrangler deploy`。得到 `https://<name>.<account>.workers.dev`(或绑自有域名)。
 7. 首次:管理页登录 → 录入账号 → 生成客户端 token → 填进各客户端的
    `server-config.json`(`apiBase` 指向 Worker 域名)。
 

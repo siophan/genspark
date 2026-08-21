@@ -28,10 +28,14 @@ function readCachedAccount(userDataDir, { fs = fsDefault } = {}) {
 function writeCachedAccount(userDataDir, { email, password }, { fs = fsDefault } = {}) {
   // 0600:文件里是明文密码,默认的 0644 会让同一台 Mac 上任何别的用户都读得到。
   // 写失败照旧只记一行日志 —— 缓存不上不该让这次已经拿到手的账号作废。
+  const file = cachedAccountFile(userDataDir)
   try {
-    fs.writeFileSync(cachedAccountFile(userDataDir), JSON.stringify({ email, password }), { mode: 0o600 })
+    fs.writeFileSync(file, JSON.stringify({ email, password }), { mode: 0o600 })
   }
-  catch (e) { console.error('[account-source] cache write failed:', e.message) }
+  catch (e) { console.error('[account-source] cache write failed:', e.message); return }
+  // mode only applies when writeFileSync creates the file, so a cache written
+  // by an older build stays 0644 through every overwrite. Tighten it directly.
+  try { fs.chmodSync(file, 0o600) } catch {}
 }
 
 // 永不抛。统一返回 { ok, status, body }:status 为 0 表示请求根本没发出去

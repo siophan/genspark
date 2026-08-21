@@ -7,10 +7,11 @@ const {
   requestLease, renewLease, renewTrackedLeases, releaseLease, resolveRemoteAccount,
 } = require('../src/account-source')
 
-function fakeFs(files, writes = []) {
+function fakeFs(files, writes = [], chmods = []) {
   return {
     readFileSync(p) { if (p in files) return files[p]; const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e },
     writeFileSync(p, d, opts) { files[p] = d; writes.push({ p, d, opts }) },
+    chmodSync(p, mode) { chmods.push({ p, mode }) },
     existsSync(p) { return p in files },
   }
 }
@@ -326,6 +327,24 @@ test('writeCachedAccount writes the credential cache as 0600', () => {
   writeCachedAccount('/u', { email: 'a@x', password: 'p' }, { fs: fakeFs(files, writes) })
   assert.equal(writes.length, 1)
   assert.equal(writes[0].opts && writes[0].opts.mode, 0o600)
+  assert.deepEqual(JSON.parse(files['/u/cached-account.json']), { email: 'a@x', password: 'p' })
+})
+
+// writeFileSync 的 mode 只在它新建文件时生效,所以老版本留下的 0644 缓存
+// 每次覆写后仍是 0644。必须显式收紧。
+test('writeCachedAccount tightens an already-existing cache file', () => {
+  const files = { '/u/cached-account.json': JSON.stringify({ email: 'old@x', password: 'old' }) }
+  const chmods = []
+  writeCachedAccount('/u', { email: 'a@x', password: 'p' }, { fs: fakeFs(files, [], chmods) })
+  assert.deepEqual(chmods, [{ p: '/u/cached-account.json', mode: 0o600 }])
+})
+
+// chmod 失败不该让已经写成功的缓存变成"写失败"。
+test('writeCachedAccount keeps the cache when chmod fails', () => {
+  const files = {}
+  const fs = fakeFs(files)
+  fs.chmodSync = () => { throw new Error('EPERM') }
+  assert.doesNotThrow(() => writeCachedAccount('/u', { email: 'a@x', password: 'p' }, { fs }))
   assert.deepEqual(JSON.parse(files['/u/cached-account.json']), { email: 'a@x', password: 'p' })
 })
 
