@@ -5,8 +5,14 @@ import { getSignedCookie, setSignedCookie } from 'hono/cookie'
 
 const COOKIE = 'admin'
 
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]))
+}
+
 function page(title, body) {
-  return `<!doctype html><meta charset=utf-8><title>${title}</title>` +
+  return `<!doctype html><meta charset=utf-8><title>${esc(title)}</title>` +
     `<style>body{font-family:-apple-system,system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 16px}` +
     `table{border-collapse:collapse;width:100%;margin:12px 0}td,th{border:1px solid #ddd;padding:6px 8px;text-align:left}` +
     `input,button{padding:6px 8px;margin:2px}form.inline{display:inline}</style>${body}`
@@ -34,17 +40,18 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
     return c.redirect('/admin', 302)
   })
 
-  app.use('/admin', async (c, next) => {
+  const authMw = async (c, next) => {
     if (!(await isAuthed(c))) return c.redirect('/admin/login', 302)
     await next()
-  })
-  app.use('/admin/accounts/*', async (c, next) => {
-    if (!(await isAuthed(c))) return c.redirect('/admin/login', 302)
-    await next()
-  })
-  app.use('/admin/clients*', async (c, next) => {
-    if (!(await isAuthed(c))) return c.redirect('/admin/login', 302)
-    await next()
+  }
+  // '/admin' 只精确匹配 /admin 本身;'/admin/*' 覆盖其下所有子路径(含 /admin/login,
+  // 因此显式放行登录页,其余一律要求认证)。三条易错的路径拼图(accounts/*、clients*)
+  // 已被这两条覆盖式规则取代——clients* 在 Hono 下会被当成静态字面量,匹配不到任何真实
+  // 路径,曾导致 /admin/clients* 下所有写路由对匿名请求完全开放。
+  app.use('/admin', authMw)
+  app.use('/admin/*', async (c, next) => {
+    if (c.req.path === '/admin/login') return next()
+    return authMw(c, next)
   })
 
   app.get('/admin', async (c) => {
@@ -52,12 +59,12 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
     const accounts = await db.listAccounts()
     const clients = await db.listClients()
     const arows = accounts.map((a) =>
-      `<tr><td>${a.id}</td><td>${a.email}</td><td>${a.enabled ? '✓' : '✗'}</td>` +
-      `<td>${a.leased_by || ''}</td><td>` +
+      `<tr><td>${a.id}</td><td>${esc(a.email)}</td><td>${a.enabled ? '✓' : '✗'}</td>` +
+      `<td>${esc(a.leased_by || '')}</td><td>` +
       `<form class=inline method=post action=/admin/accounts/${a.id}/toggle><button>开关</button></form> ` +
       `<form class=inline method=post action=/admin/accounts/${a.id}/delete><button>删</button></form></td></tr>`).join('')
     const crows = clients.map((cl) =>
-      `<tr><td>${cl.id}</td><td>${cl.name}</td><td>${cl.enabled ? '✓' : '✗'}</td><td>` +
+      `<tr><td>${cl.id}</td><td>${esc(cl.name)}</td><td>${cl.enabled ? '✓' : '✗'}</td><td>` +
       `<form class=inline method=post action=/admin/clients/${cl.id}/toggle><button>开关</button></form></td></tr>`).join('')
     return c.html(page('后台',
       '<h1>账号</h1>' +
@@ -91,11 +98,12 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
   app.post('/admin/clients', async (c) => {
     const db = makeDb(c.env.DB)
     const f = await c.req.parseBody()
+    const name = String(f.name || '')
     const token = await generateToken()
-    await db.createClient({ name: String(f.name || ''), token_hash: await hashToken(token) })
+    await db.createClient({ name, token_hash: await hashToken(token) })
     return c.html(page('新 token',
-      `<p>客户端 <b>${f.name}</b> 的 token(只显示这一次,请复制):</p>` +
-      `<pre>${token}</pre><a href=/admin>返回</a>`))
+      `<p>客户端 <b>${esc(name)}</b> 的 token(只显示这一次,请复制):</p>` +
+      `<pre>${esc(token)}</pre><a href=/admin>返回</a>`))
   })
   app.post('/admin/clients/:id/toggle', async (c) => {
     const db = makeDb(c.env.DB)
