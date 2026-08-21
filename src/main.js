@@ -89,7 +89,10 @@ async function resolveAccountSafely() {
   try {
     return await chooseAccount()
   } catch (err) {
-    console.error('[account] resolve failed, opening without auto-login:', err.message)
+    // Logged whole rather than as err.message: the thrown value need not be an
+    // Error, and reading .message off null would throw from inside the catch —
+    // turning the safety net back into the failure it is here to prevent.
+    console.error('[account] resolve failed, opening without auto-login:', err)
     return null
   }
 }
@@ -197,33 +200,47 @@ function createWindow(dir, account) {
   return win
 }
 
+// The single way a window gets opened, so the first one and every later
+// activate share one re-entrancy guard: resolving the account is awaited, and
+// without the guard a second activate arriving during that gap would see no
+// windows and open its own — burning a second lease nobody asked for. Never
+// rejects, so it is safe to hand straight to an event listener.
+async function openWindow(dir) {
+  if (openingWindow || BrowserWindow.getAllWindows().length !== 0) return
+  openingWindow = true
+  try {
+    // Resolving the account can take a network round trip, so the window waits
+    // for it — one created without an account would never auto-log-in.
+    createWindow(dir, await resolveAccountSafely())
+  } catch (err) {
+    console.error('[window] could not open a window:', err)
+  } finally {
+    openingWindow = false
+  }
+}
+
 app.whenReady().then(async () => {
   const dir = scriptsDir(app.getPath('userData'))
-  ensureScriptDir(dir)
-  serveScripts(dir)
-  serveAccount()
 
+  // Both listeners go up first, before anything that can fail. Registering a
+  // listener cannot throw, and having them in place means a later step blowing
+  // up costs at most a feature — not the whole app. In particular the Dock
+  // icon stays a way to get a window even if the first one never opens.
+  //
   // Every window, including popups, keeps the original brand out of its title
   // bar. Registered before the first window is created so it catches it too.
   app.on('browser-window-created', (_event, win) => guardWindowTitle(win))
+  app.on('activate', () => openWindow(dir))
 
+  ensureScriptDir(dir)
+  serveScripts(dir)
+  serveAccount()
   buildMenu({ onOpenScriptsDir: () => shell.openPath(dir) })
-  // Resolving the account can take a network round trip, so the first window
-  // waits for it — a window created without one would never auto-log-in.
-  createWindow(dir, await resolveAccountSafely())
-
-  // Resolving the account is awaited, so without a guard a second activate
-  // arriving during that window would also see no windows and open its own —
-  // burning a second lease on an account nobody asked for.
-  app.on('activate', async () => {
-    if (openingWindow || BrowserWindow.getAllWindows().length !== 0) return
-    openingWindow = true
-    try {
-      createWindow(dir, await resolveAccountSafely())
-    } finally {
-      openingWindow = false
-    }
-  })
+  await openWindow(dir)
+}).catch((err) => {
+  // Nothing above is allowed to end as an unhandled rejection: it would be
+  // silent, and the user would be left staring at an app that never opened.
+  console.error('[startup] setup failed — the Dock icon can still open a window:', err)
 })
 
 // Handing the lease back on quit puts the account straight back in the pool.

@@ -182,9 +182,10 @@ test('resolveRemoteAccount: a 200 lease with no email falls back to cache and le
   const fs = fakeFs(files)
   const fetch = async () => jsonResponse(200, { lease_id: 1, expires_at: 9 })
   const out = await resolveRemoteAccount('/u', { fetch, fs })
+  // 缓存断言放在最前:返回值断言先失败的话,这条就跑不到,负向对照里等于没验。
+  assert.equal(files['/u/cached-account.json'], good)   // 缓存未被污染
   assert.equal(out.email, 'c@x')
   assert.equal(out.lease, null)
-  assert.equal(files['/u/cached-account.json'], good)   // 缓存未被污染
 })
 
 test('resolveRemoteAccount: a 200 lease with no password leaves the cache intact', async () => {
@@ -196,14 +197,15 @@ test('resolveRemoteAccount: a 200 lease with no password leaves the cache intact
   const fs = fakeFs(files)
   const fetch = async () => jsonResponse(200, { email: 'a@x', lease_id: 1 })
   const out = await resolveRemoteAccount('/u', { fetch, fs })
-  assert.equal(out.email, 'c@x')
   assert.equal(files['/u/cached-account.json'], good)
+  assert.equal(out.email, 'c@x')
 })
 
 test('resolveRemoteAccount: a malformed 200 with no cache returns null and writes nothing', async () => {
   const files = { '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }) }
   const fs = fakeFs(files)
   const fetch = async () => jsonResponse(200, {})
-  assert.equal(await resolveRemoteAccount('/u', { fetch, fs }), null)
+  const out = await resolveRemoteAccount('/u', { fetch, fs })
   assert.equal('/u/cached-account.json' in files, false)
+  assert.equal(out, null)
 })
