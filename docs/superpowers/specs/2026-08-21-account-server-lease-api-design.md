@@ -1,4 +1,4 @@
-# 账号服务端(租约分配 API + 管理后台)设计
+# 账号服务端(租约分配 API + 管理后台)设计 — Cloudflare 版
 
 日期:2026-08-21
 状态:已批准,待写实现计划
@@ -20,10 +20,22 @@
 ## 决策(已确认)
 
 - 使用规模:小团队(几人~几十人)。
-- 托管:自己的香港 VPS(免 ICP 备案,对国内延迟友好)。
+- 托管:**Cloudflare Workers + D1**(serverless,免运维、自动 HTTPS、这点量基本免费)。
 - 分配模式:**服务端租约分配**(不是下发整个池子)。
 - 代码位置:同仓库新增 `server/` 目录。
-- 默认用户地区:国内(部署章节按香港节点写,后续可调)。
+- 默认用户地区:国内(Cloudflare 无国内节点,但本方案为低频调用且有离线兜底,影响很小)。
+
+## 为什么 Cloudflare(相对自建 VPS)
+
+- 无服务器运维:不用管机器、systemd、更新、监控。
+- HTTPS / 证书自动,不用 nginx + certbot。
+- D1 就是托管版 SQLite,SQL 基本一致,自带备份。
+- 免费额度对本量级绰绰有余;有免费 `*.workers.dev` 域名,也可绑自有域名。
+
+代价(已接受):
+- 代码按 Workers 运行时写(见下:Hono 代替 Fastify、D1 binding 代替 better-sqlite3)。
+- 原子租约不能用交互式事务,改为一条**条件 UPDATE**(见"租约语义")。
+- 国内访问 Cloudflare 稳定性偶尔飘;因是低频调用且有兜底链,影响可接受。
 
 ## YAGNI(明确不做)
 
@@ -36,28 +48,29 @@
 
 ## 架构 / 目录
 
-同仓库新增 `server/`,和客户端一起版本管理:
+同仓库新增 `server/`,一个 Cloudflare Workers 项目(用 wrangler 管理):
 
 ```
 server/
   src/
-    db.js         # better-sqlite3 建表 + 查询封装
+    index.js      # Worker 入口:Hono app,挂 /api 与 /admin
     lease.js      # 租约核心逻辑(尽量纯函数,便于单测)
-    crypto.js     # 账号密码加密 / 解密
+    crypto.js     # 账号密码加密 / 解密(Web Crypto,AES-GCM)
     tokens.js     # 客户端 token 生成 / 校验(库里只存 hash)
-    api.js        # Fastify 路由:/api/lease /renew /release
+    api.js        # 路由:/api/lease /renew /release
     admin.js      # 管理页路由 + 管理员登录
-    server.js     # 组装 + 启动
-  test/           # node:test,与客户端同风格
-  migrations.sql  # 建表语句
-  package.json    # 服务端独立依赖(Fastify、better-sqlite3)
+    db.js         # D1 查询封装(prepared statements)
+  test/           # 纯逻辑用 node:test;涉及 D1 的用 miniflare(本地 D1)
+  schema.sql      # 建表语句(wrangler d1 migrations 用)
+  wrangler.toml   # Worker 配置 + D1 binding + secrets 声明
+  package.json    # 服务端独立依赖(hono、wrangler、miniflare)
 ```
 
-- 运行时:Node + Fastify + better-sqlite3(单文件 DB,几十人量级足够)。
-- 部署:香港 VPS,nginx 反代 + Let's Encrypt(certbot)出 HTTPS,systemd 守护。
-- 服务端 `package.json` 独立于客户端,避免把服务端依赖打进 Electron 包。
+- 运行时:Cloudflare Workers + Hono(轻量路由)+ D1(SQLite)。
+- 加密:Web Crypto(Workers 与 Node 均内置),不引第三方加密库。
+- 服务端 `package.json` 独立于客户端,不与 Electron 依赖混用。
 
-## 数据模型
+## 数据模型(D1 / SQLite)
 
 ```sql
 CREATE TABLE accounts (
@@ -88,13 +101,13 @@ CREATE TABLE leases (
 
 一个账号"有有效租约" = 存在一条 `released_at IS NULL AND expires_at > now` 的 lease。
 
-密码字段存**加密后**的密文,密钥来自服务端环境变量(不进库、不进 git)。
+密码字段存**加密后**的密文,密钥来自 Worker secret(不进库、不进 git)。
 
 ## 加密
 
-- 对称加密账号密码:AES-256-GCM,密钥来自环境变量 `ACCOUNT_ENC_KEY`(32 字节,
-  base64 或 hex)。
-- 存储格式:`iv:authTag:ciphertext`(各段 base64,冒号分隔),便于解密时切分。
+- 对称加密账号密码:AES-256-GCM,通过 Web Crypto(`crypto.subtle`)实现。
+- 密钥来自 Worker secret `ACCOUNT_ENC_KEY`(32 字节,base64)。
+- 存储格式:`iv:ciphertext`(GCM 的 authTag 附在密文尾部,各段 base64,冒号分隔)。
 - 管理页默认对密码打码,仅在明确"查看/编辑"时解密回显。
 
 ## API 契约
@@ -137,10 +150,13 @@ token 校验:`sha256(token)` 命中 `clients.token_hash` 且 `enabled=1`,并更�
 - **TTL**:30 分钟(`LEASE_TTL_MS`,可配)。
 - **续租间隔**:客户端每 10 分钟 `renew` 一次。
 - **崩溃回收**:客户端异常退出不 release,租约到期后账号自动回到可用池。
-- **原子分配**:选号 + 写租约在同一个 `BEGIN IMMEDIATE` 事务内完成,防止两个
-  并发请求抢到同一个号。
-- **粘性(sticky)**:分配时优先把该 client 上次用过的账号(若当前可用)再分给它,
-  使客户端本地 session 分区保持热态、减少重登;该号不可用时再从其余可用账号里挑。
+- **原子分配(D1 版)**:D1 不支持交互式事务(先 SELECT 再 UPDATE 加锁),因此改为
+  **一条带条件的写语句**保证不撞号——先算出候选 `account_id`,再执行
+  `INSERT INTO leases (...) SELECT ... WHERE NOT EXISTS (该账号仍有有效租约)`
+  或等价的条件写,并用 `RETURNING` 拿回结果;若受影响行数为 0 说明被并发抢走,
+  重试挑下一个候选(有限次)。这样即使两个请求同时进来也不会给同一个号发出两条有效租约。
+- **粘性(sticky)**:分配时优先尝试该 client 上次用过的账号(若当前可用),让客户端本地
+  session 分区保持热态、减少重登;该号被抢或不可用时再从其余可用账号里挑。
 - 选中后更新 `accounts.last_used_at`。
 
 ## 客户端改动
@@ -164,38 +180,41 @@ token 校验:`sha256(token)` 命中 `clients.token_hash` 且 `enabled=1`,并更�
 
 ## 管理后台
 
-- 路由 `/admin/*`,单管理员登录:密码存 hash(`ADMIN_PASSWORD_HASH` 环境变量或
-  首次启动生成),会话用签名 cookie。
+- 路由 `/admin/*`,单管理员登录:密码存 hash(Worker secret `ADMIN_PASSWORD_HASH`),
+  会话用签名 cookie。
 - 页面功能:
   - 账号:列表(含 enabled 开关、last_used、当前租给哪个 client)、新增、编辑、删除。
   - 客户端:生成新 token(**只在生成时明文显示一次**,库里存 hash)、停用/启用、看
     last_seen。
-- 极简实现:服务端渲染 HTML + 少量原生 JS,不引前端框架。
+- 极简实现:Worker 直接返回服务端渲染的 HTML + 少量原生 JS,不引前端框架。
 
-## 测试策略(TDD,node:test)
+## 测试策略(TDD)
 
-纯逻辑单测:
-- `lease.js`:可用账号筛选(enabled + 无有效租约)、过期回收、粘性优先、无可用返回。
-- `crypto.js`:加密后能解密回原文;密文格式;错误密钥/密文的处理。
+纯逻辑单测(node:test,不碰 D1):
+- `lease.js`:候选选择(enabled + 无有效租约)、粘性优先、无可用返回、条件写落空后的
+  重试选下一个候选;把 DB 访问抽象成可注入接口来纯测。
+- `crypto.js`:加密后能解密回原文;密文格式;错误密钥/密文的处理(Web Crypto 在 Node
+  下同样可用)。
 - `tokens.js`:生成 token、`sha256` 校验命中/不命中、停用 client 被拒。
 - 客户端 `account-source.js`:配置读取兜底、lease 成功映射到老结构、失败回落链
   (缓存 → 桌面文件 → null)。用可注入的 fetch/fs 做纯测试。
 
-集成测试(少量):Fastify 路由跑 lease → renew → release → 再 lease 全流程,用内存/临时
-SQLite;并发两次 lease 不撞号。
+集成测试(少量,用 miniflare 起本地 Worker + 本地 D1):lease → renew → release → 再
+lease 全流程;并发两次 lease 不撞号(验证条件写)。
 
-## 部署(香港 VPS)
+## 部署(Cloudflare)
 
-1. `git pull` 到 VPS。
-2. `cd server && npm ci`。
-3. 环境变量(systemd unit 的 `Environment=` 或 `.env`):`ACCOUNT_ENC_KEY`、
-   `ADMIN_PASSWORD_HASH`、`PORT`、`DB_PATH`、可选 `LEASE_TTL_MS`。
-4. `systemd` 起服务(自启 + 崩溃重启)。
-5. nginx 反代到 `PORT`,`certbot` 签 Let's Encrypt 证书,强制 HTTPS。
-6. 首次:管理页登录 → 录入账号 → 生成客户端 token → 填进各客户端的
-   `server-config.json`。
+1. `cd server && npm ci`(装 wrangler、hono、miniflare)。
+2. `wrangler login`(一次性授权)。
+3. 建 D1:`wrangler d1 create genspark-accounts`,把返回的 database_id 写进
+   `wrangler.toml` 的 D1 binding。
+4. 建表:`wrangler d1 execute genspark-accounts --file server/schema.sql`(远端)。
+5. 塞 secrets:`wrangler secret put ACCOUNT_ENC_KEY`、`wrangler secret put ADMIN_PASSWORD_HASH`。
+6. 部署:`wrangler deploy`。得到 `https://<name>.<account>.workers.dev`(或绑自有域名)。
+7. 首次:管理页登录 → 录入账号 → 生成客户端 token → 填进各客户端的
+   `server-config.json`(`apiBase` 指向 Worker 域名)。
 
 ## 兼容 / 回滚
 
 - 桌面文件逻辑完整保留,作为离线兜底;把 `server-config.json` 删掉即退回纯本地模式。
-- 服务端与客户端解耦:服务端挂了,客户端用缓存/桌面文件继续可用。
+- 服务端与客户端解耦:Worker 挂了,客户端用缓存/桌面文件继续可用。
