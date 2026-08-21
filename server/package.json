@@ -1,0 +1,17 @@
+{
+  "name": "genspark-account-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0",
+    "miniflare": "^3.20240925.0"
+  }
+}
