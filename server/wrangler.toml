@@ -1,0 +1,11 @@
+name = "genspark-account-server"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "genspark-accounts"
+database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"   # 部署时填入
+
+[vars]
+LEASE_TTL_MS = "1800000"
