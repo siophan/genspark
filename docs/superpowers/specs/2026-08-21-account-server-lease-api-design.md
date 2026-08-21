@@ -209,6 +209,20 @@ Apple Silicon 会直接 SIGKILL,所以改成上面这套零额外依赖的方案
 
 ## 部署(Cloudflare)
 
+> **先看这条,否则下面每一步都可能卡住。** 如果任何 wrangler 命令报
+> `TypeError: fetch failed`,而 `curl https://api.cloudflare.com/client/v4/user`
+> 明明是通的,那不是网络断了,也不是没登录。原因是 Node 的 happy-eyeballs 默认
+> 只给每个候选地址 250ms 完成 TCP 握手,而国内到 Cloudflare 的握手常在 400ms
+> 以上 —— 每个地址都被判超时,最后聚合成 `ETIMEDOUT`。curl 没有这个限制,所以
+> **"curl 通、wrangler 不通"就是这个问题的指纹**。给下面每一条 wrangler 命令
+> 加上前缀即可:
+>
+> ```
+> NODE_OPTIONS=--network-family-autoselection-attempt-timeout=5000 npx wrangler ...
+> ```
+>
+> 嫌长就 `export` 一次,当前终端里后续所有命令都生效。
+
 1. `cd server && npm ci`(装 wrangler、hono)。
 2. `npx wrangler login`(一次性授权)。
 3. 建 D1:`npx wrangler d1 create genspark-accounts`,把返回的 database_id 写进

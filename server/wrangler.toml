@@ -5,7 +5,7 @@ compatibility_date = "2024-09-23"
 [[d1_databases]]
 binding = "DB"
 database_name = "genspark-accounts"
-database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"   # 部署时填入
+database_id = "532bf3c9-b0d8-4b4d-89ed-43c60899d538"   # 部署时填入
 
 [vars]
 LEASE_TTL_MS = "1800000"
