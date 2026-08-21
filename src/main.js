@@ -21,7 +21,7 @@ const {
 } = require('./accounts')
 const { buildLoginScript } = require('./auto-login')
 const { serveAccount, registerLoginScript, clearLoginScript } = require('./account-bridge')
-const { resolveRemoteAccount, renewLease, releaseLease } = require('./account-source')
+const { resolveRemoteAccount, renewTrackedLeases, releaseLease } = require('./account-source')
 
 const PRELOAD = path.join(__dirname, 'preload.js')
 
@@ -115,15 +115,15 @@ function trackLease(lease) {
     // standing down keeps rounds from piling up on top of one another.
     if (renewing) return
     renewing = true
+    // One round over every held lease. It decides, per lease, between "the
+    // server says this lease is gone" (stop tracking it — the window keeps
+    // browsing on the session it already has, and the next launch takes a
+    // fresh lease) and "this attempt failed" (keep it and try again on the
+    // next tick). Collapsing the two would let a single Wi-Fi blip end
+    // renewal for good and hand the account to a second machine 30 minutes
+    // later. It never rejects, so the finally is only bookkeeping.
     try {
-      for (const held of activeLeases) {
-        const expiresAt = await renewLease(held)
-        // A lease the server no longer knows about (expired, or reclaimed) is
-        // simply forgotten: the window keeps browsing on the session it
-        // already has, and the next launch takes a fresh lease.
-        if (expiresAt == null) activeLeases.delete(held)
-        else held.expiresAt = expiresAt
-      }
+      await renewTrackedLeases(activeLeases)
     } finally {
       renewing = false
     }
