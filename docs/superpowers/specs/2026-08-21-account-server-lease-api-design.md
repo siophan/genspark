@@ -208,11 +208,29 @@ lease 全流程;并发两次 lease 不撞号(验证条件写)。
 2. `wrangler login`(一次性授权)。
 3. 建 D1:`wrangler d1 create genspark-accounts`,把返回的 database_id 写进
    `wrangler.toml` 的 D1 binding。
-4. 建表:`wrangler d1 execute genspark-accounts --file server/schema.sql`(远端)。
+4. 建表:`npx wrangler d1 execute genspark-accounts --remote --file schema.sql`。
+   两个细节都会决定成败:第 1 步已经 `cd server`,所以路径是 `schema.sql` 而不是
+   `server/schema.sql`;`--remote` 也不能省 —— wrangler v3 的 `d1 execute` 默认打
+   在**本地模拟库**上,漏掉它表就只建在本地,线上 Worker 每个 API 调用都 500,而
+   客户端会静默回落到缓存/桌面文件,表现成"配置好了但从来没生效"。
 5. 塞 secrets:`wrangler secret put ACCOUNT_ENC_KEY`、`wrangler secret put ADMIN_PASSWORD_HASH`。
+   两个值都要自己先生成好,命令只是把它贴进去:
+
+   - `ACCOUNT_ENC_KEY`:32 字节随机数的 base64(AES-256-GCM 的密钥)。
+     `openssl rand -base64 32`
+   - `ADMIN_PASSWORD_HASH`:管理员密码的 sha256,小写十六进制 —— 与代码里的
+     `hashToken` 完全一致。
+     `printf '%s' 'YOUR_PASSWORD' | shasum -a 256 | cut -d' ' -f1`
+
+   管理员密码请用一长串随机字符串。`ADMIN_PASSWORD_HASH` 是无盐、单轮的 sha256,
+   而且它同时被当作后台 cookie 的签名密钥 —— 一个能被猜到或被跑字典的弱密码,
+   等于把后台和 cookie 一起交出去。
 6. 部署:`wrangler deploy`。得到 `https://<name>.<account>.workers.dev`(或绑自有域名)。
 7. 首次:管理页登录 → 录入账号 → 生成客户端 token → 填进各客户端的
    `server-config.json`(`apiBase` 指向 Worker 域名)。
+
+   `apiBase` **必须**是 `https://`。代码不做强制,而 `http://` 会让客户端 token
+   和账号密码以明文走线路。尾部斜杠写不写都行(客户端会规范掉)。
 
 ## 兼容 / 回滚
 
