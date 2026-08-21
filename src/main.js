@@ -104,6 +104,11 @@ function trackLease(lease) {
   if (renewTimer.unref) renewTimer.unref()
 }
 
+// Set while an activate is resolving an account, so a second one stands down
+// instead of opening a duplicate window. Reset in a finally: left stuck, the
+// Dock icon would never open a window again.
+let openingWindow = false
+
 async function releaseAllLeases() {
   const leases = [...activeLeases]
   activeLeases.clear()
@@ -176,8 +181,17 @@ app.whenReady().then(async () => {
   // waits for it — a window created without one would never auto-log-in.
   createWindow(dir, await chooseAccount())
 
+  // Resolving the account is awaited, so without a guard a second activate
+  // arriving during that window would also see no windows and open its own —
+  // burning a second lease on an account nobody asked for.
   app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(dir, await chooseAccount())
+    if (openingWindow || BrowserWindow.getAllWindows().length !== 0) return
+    openingWindow = true
+    try {
+      createWindow(dir, await chooseAccount())
+    } finally {
+      openingWindow = false
+    }
   })
 })
 
