@@ -79,8 +79,17 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
   app.post('/admin/accounts', async (c) => {
     const db = makeDb(c.env.DB)
     const f = await c.req.parseBody()
-    const enc = await encryptPassword(String(f.password || ''), c.env.ACCOUNT_ENC_KEY)
-    await db.createAccount({ email: String(f.email || ''), password_enc: enc, note: f.note ? String(f.note) : null })
+    const email = String(f.email ?? '').trim()
+    const password = String(f.password ?? '')
+    // email 为空的账号仍然是完全合法的出租候选:客户端租到它、发现 email 是空的、
+    // 把它丢掉 —— 白烧一个 30 分钟的租约,而且每次启动都会再烧一个。后台上一次
+    // 手滑点到"新增"就够了,所以挡在入口。
+    if (!email || !password.trim()) {
+      return c.html(page('新增失败',
+        '<p>email 和密码都不能为空。</p><a href=/admin>返回</a>'), 400)
+    }
+    const enc = await encryptPassword(password, c.env.ACCOUNT_ENC_KEY)
+    await db.createAccount({ email, password_enc: enc, note: f.note ? String(f.note) : null })
     return c.redirect('/admin', 302)
   })
   app.post('/admin/accounts/:id/toggle', async (c) => {

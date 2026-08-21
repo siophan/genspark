@@ -66,6 +66,15 @@ async function login(app, e) {
   return (res.headers.get('set-cookie') || '').split(';')[0]
 }
 
+// 已登录地提交一次"新增账号"表单。
+async function createAccount(app, e, body) {
+  return app.request('/admin/accounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: await login(app, e) },
+    body,
+  }, e)
+}
+
 test('GET /admin without cookie redirects to login', async () => {
   const { app } = buildApp()
   const res = await app.request('/admin', {}, { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH })
@@ -192,4 +201,40 @@ test('GET /admin escapes untrusted client name, account email and leased_by (sto
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/)
   assert.match(html, /&lt;script&gt;alert\(2\)&lt;\/script&gt;/)
   assert.match(html, /&lt;b&gt;evil-client&lt;\/b&gt;/)
+})
+
+// 空 email 的账号是合法的出租候选:客户端租到它、发现没 email、丢掉,白烧一个
+// 30 分钟的租约,而且每次启动都会再烧一个。后台上手滑点一下"新增"就够了。
+test('POST /admin/accounts rejects an empty email instead of poisoning the pool', async () => {
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const { app, state } = buildApp()
+  const res = await createAccount(app, e, 'email=&password=pw')
+  assert.equal(res.status, 400)
+  assert.equal(state.calls.createAccount.length, 0)
+  assert.equal(state.accounts.length, 0)
+})
+
+test('POST /admin/accounts rejects a whitespace-only email', async () => {
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const { app, state } = buildApp()
+  const res = await createAccount(app, e, 'email=%20%20&password=pw')
+  assert.equal(res.status, 400)
+  assert.equal(state.calls.createAccount.length, 0)
+})
+
+test('POST /admin/accounts rejects an empty password', async () => {
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const { app, state } = buildApp()
+  const res = await createAccount(app, e, 'email=a%40x.com&password=')
+  assert.equal(res.status, 400)
+  assert.equal(state.calls.createAccount.length, 0)
+})
+
+test('POST /admin/accounts still creates a valid account, with the email trimmed', async () => {
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const { app, state } = buildApp()
+  const res = await createAccount(app, e, 'email=%20a%40x.com%20&password=pw')
+  assert.equal(res.status, 302)
+  assert.equal(state.calls.createAccount.length, 1)
+  assert.equal(state.calls.createAccount[0].email, 'a@x.com')
 })

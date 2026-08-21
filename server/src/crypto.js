@@ -29,7 +29,14 @@ export async function encryptPassword(plaintext, keyBase64) {
 }
 
 export async function decryptPassword(encStr, keyBase64) {
-  const [ivB64, cipherB64] = encStr.split(':')
+  // 先把格式挡住:密文列被截断、或者干脆存进了别的东西时,不做检查就会一路
+  // 掉进 Web Crypto 里抛出一个跟原因毫无关系的错误(atob 的 InvalidCharacter、
+  // 或者 iv 长度不对)。这里给一个可预期的失败,调用方才好分辨。
+  const parts = String(encStr ?? '').split(':')
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error('decryptPassword: expected "iv_b64:cipher_b64"')
+  }
+  const [ivB64, cipherB64] = parts
   const key = await importKey(keyBase64)
   const plain = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: b64ToBytes(ivB64) },

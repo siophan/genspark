@@ -21,7 +21,7 @@ function makeFakeDbFactory(state) {
     },
     async touchAccount() {},
     async renewLease({ leaseId }) { return leaseId === 501 ? 9999 : null },
-    async releaseLease() { state.released = true },
+    async releaseLease(args) { state.released = true; (state.releases ||= []).push(args) },
   })
 }
 
@@ -97,4 +97,38 @@ test('POST /api/release → 200 ok', async () => {
   assert.equal(res.status, 200)
   assert.equal((await res.json()).ok, true)
   assert.equal(state.released, true)
+})
+
+// 解密发生在租约已经落库之后。它一抛,租约还攥在手里,这个账号就白锁满一个
+// TTL —— 而 ACCOUNT_ENC_KEY 一旦轮换,整池账号会一次一个地变成幽灵租约。
+test('POST /api/lease releases the lease it just took when the password will not decrypt', async () => {
+  const tokenHash = await hashToken('t')
+  const state = { tokenHash, available: [{ id: 1, email: 'a@x.com', password_enc: 'corrupted-not-iv-colon-cipher' }] }
+  const app = await buildApp(state)
+  const res = await app.request(
+    '/api/lease',
+    { method: 'POST', headers: { Authorization: 'Bearer t' } },
+    env,
+  )
+  // 账号必须立刻回到池子里,而不是被锁满一个 TTL。
+  assert.equal(state.released, true)
+  assert.deepEqual(state.releases.map((r) => r.leaseId), [501])
+  assert.equal(res.status, 500)
+  assert.equal((await res.json()).error, 'account_unreadable')
+})
+
+test('POST /api/lease releases the lease when ACCOUNT_ENC_KEY has been rotated', async () => {
+  const tokenHash = await hashToken('t')
+  const enc = await encryptPassword('pw123', KEY)
+  const state = { tokenHash, available: [{ id: 1, email: 'a@x.com', password_enc: enc }] }
+  const app = await buildApp(state)
+  const rotated = { ...env, ACCOUNT_ENC_KEY: Buffer.alloc(32, 7).toString('base64') }
+  const res = await app.request(
+    '/api/lease',
+    { method: 'POST', headers: { Authorization: 'Bearer t' } },
+    rotated,
+  )
+  assert.equal(state.released, true)
+  assert.equal(res.status, 500)
+  assert.equal((await res.json()).error, 'account_unreadable')
 })
