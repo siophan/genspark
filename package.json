@@ -31,8 +31,18 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -61,8 +71,8 @@
           ]
         }
       ],
-      "category": "public.app-category.productivity",
-      "identity": null
-    }
+      "category": "public.app-category.productivity"
+    },
+    "afterPack": "scripts/afterPack.js"
   }
 }
