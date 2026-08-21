@@ -67,7 +67,10 @@ function pickLocalAccount(userData) {
 async function chooseAccount() {
   const userData = app.getPath('userData')
   const remote = await resolveRemoteAccount(userData)
-  const chosen = remote || pickLocalAccount(userData)
+  // A truthy answer is not necessarily a usable one — a malformed 200 from the
+  // server would otherwise short-circuit the whole fallback chain.
+  const usable = remote && remote.email && remote.password ? remote : null
+  const chosen = usable || pickLocalAccount(userData)
   if (!chosen) return null
 
   return {
@@ -75,7 +78,19 @@ async function chooseAccount() {
     partition: partitionName(chosen.email),
     loginScript: buildLoginScript(chosen.email, chosen.password),
     // Only a live lease needs renewing; a cached or desktop account has none.
-    lease: remote ? remote.lease : null,
+    lease: usable ? usable.lease : null,
+  }
+}
+
+// The window has to open no matter what: an auto-login we could not arrange is
+// a far smaller failure than an app that shows nothing at all. Anything thrown
+// while resolving the account is logged and downgraded to "no account".
+async function resolveAccountSafely() {
+  try {
+    return await chooseAccount()
+  } catch (err) {
+    console.error('[account] resolve failed, opening without auto-login:', err.message)
+    return null
   }
 }
 
@@ -85,6 +100,7 @@ const RENEW_INTERVAL_MS = 10 * 60 * 1000
 const RELEASE_TIMEOUT_MS = 3000
 const activeLeases = new Set()
 let renewTimer = null
+let renewing = false
 
 function trackLease(lease) {
   if (!lease) return
@@ -92,13 +108,21 @@ function trackLease(lease) {
   if (renewTimer) return
 
   renewTimer = setInterval(async () => {
-    for (const held of activeLeases) {
-      const expiresAt = await renewLease(held)
-      // A lease the server no longer knows about (expired, or reclaimed) is
-      // simply forgotten: the window keeps browsing on the session it already
-      // has, and the next launch takes a fresh lease.
-      if (expiresAt == null) activeLeases.delete(held)
-      else held.expiresAt = expiresAt
+    // fetch carries no timeout, so a slow round can outlast the interval;
+    // standing down keeps rounds from piling up on top of one another.
+    if (renewing) return
+    renewing = true
+    try {
+      for (const held of activeLeases) {
+        const expiresAt = await renewLease(held)
+        // A lease the server no longer knows about (expired, or reclaimed) is
+        // simply forgotten: the window keeps browsing on the session it
+        // already has, and the next launch takes a fresh lease.
+        if (expiresAt == null) activeLeases.delete(held)
+        else held.expiresAt = expiresAt
+      }
+    } finally {
+      renewing = false
     }
   }, RENEW_INTERVAL_MS)
   if (renewTimer.unref) renewTimer.unref()
@@ -133,9 +157,16 @@ function createWindow(dir, account) {
 
   if (account) {
     const wcId = win.webContents.id
+    const lease = account.lease
     registerLoginScript(wcId, account.loginScript)
-    win.webContents.on('destroyed', () => clearLoginScript(wcId))
-    trackLease(account.lease)
+    win.webContents.on('destroyed', () => {
+      clearLoginScript(wcId)
+      // Hand the account back as soon as its window is gone, or reopening a
+      // few times would hold one lease per window and drain the pool. The
+      // delete guards the release so it cannot double up with the one on quit.
+      if (lease && activeLeases.delete(lease)) releaseLease(lease).catch(() => {})
+    })
+    trackLease(lease)
   }
 
   trackWindow(win, windowStateFile(app.getPath('userData')))
@@ -179,7 +210,7 @@ app.whenReady().then(async () => {
   buildMenu({ onOpenScriptsDir: () => shell.openPath(dir) })
   // Resolving the account can take a network round trip, so the first window
   // waits for it — a window created without one would never auto-log-in.
-  createWindow(dir, await chooseAccount())
+  createWindow(dir, await resolveAccountSafely())
 
   // Resolving the account is awaited, so without a guard a second activate
   // arriving during that window would also see no windows and open its own —
@@ -188,7 +219,7 @@ app.whenReady().then(async () => {
     if (openingWindow || BrowserWindow.getAllWindows().length !== 0) return
     openingWindow = true
     try {
-      createWindow(dir, await chooseAccount())
+      createWindow(dir, await resolveAccountSafely())
     } finally {
       openingWindow = false
     }
@@ -202,7 +233,7 @@ app.on('before-quit', (event) => {
   if (!activeLeases.size) return
   event.preventDefault()
   const cap = new Promise((resolve) => setTimeout(resolve, RELEASE_TIMEOUT_MS))
-  Promise.race([releaseAllLeases(), cap]).finally(() => app.exit(0))
+  Promise.race([releaseAllLeases(), cap]).finally(() => app.exit(0)).catch(() => {})
 })
 
 app.on('window-all-closed', () => {

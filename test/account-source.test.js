@@ -171,3 +171,39 @@ test('resolveRemoteAccount: no config returns null', async () => {
   const out = await resolveRemoteAccount('/u', { fetch: async () => { throw new Error() }, fs: fakeFs({}) })
   assert.equal(out, null)
 })
+
+// 200 但 body 缺字段:必须当作没租到,且绝不能把好的缓存覆盖成 "{}"。
+test('resolveRemoteAccount: a 200 lease with no email falls back to cache and leaves it intact', async () => {
+  const good = JSON.stringify({ email: 'c@x', password: 'cp' })
+  const files = {
+    '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }),
+    '/u/cached-account.json': good,
+  }
+  const fs = fakeFs(files)
+  const fetch = async () => jsonResponse(200, { lease_id: 1, expires_at: 9 })
+  const out = await resolveRemoteAccount('/u', { fetch, fs })
+  assert.equal(out.email, 'c@x')
+  assert.equal(out.lease, null)
+  assert.equal(files['/u/cached-account.json'], good)   // 缓存未被污染
+})
+
+test('resolveRemoteAccount: a 200 lease with no password leaves the cache intact', async () => {
+  const good = JSON.stringify({ email: 'c@x', password: 'cp' })
+  const files = {
+    '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }),
+    '/u/cached-account.json': good,
+  }
+  const fs = fakeFs(files)
+  const fetch = async () => jsonResponse(200, { email: 'a@x', lease_id: 1 })
+  const out = await resolveRemoteAccount('/u', { fetch, fs })
+  assert.equal(out.email, 'c@x')
+  assert.equal(files['/u/cached-account.json'], good)
+})
+
+test('resolveRemoteAccount: a malformed 200 with no cache returns null and writes nothing', async () => {
+  const files = { '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }) }
+  const fs = fakeFs(files)
+  const fetch = async () => jsonResponse(200, {})
+  assert.equal(await resolveRemoteAccount('/u', { fetch, fs }), null)
+  assert.equal('/u/cached-account.json' in files, false)
+})

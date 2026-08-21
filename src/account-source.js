@@ -57,7 +57,12 @@ async function resolveRemoteAccount(userDataDir, { fetch = globalThis.fetch, fs 
   const cfg = readServerConfig(userDataDir, { fs })
   if (!cfg) return null
   const leased = await requestLease(cfg, { fetch })
-  if (leased) {
+  // A 200 is not the same as a usable account: a half-deployed Worker, or an
+  // apiBase typo'd onto some unrelated JSON endpoint, answers 200 with a body
+  // that has no credentials in it. Treated as "no lease" — it must not reach
+  // the caller, and above all it must not overwrite a good cached account with
+  // {} and destroy the offline fallback for the next launch too.
+  if (leased && leased.email && leased.password) {
     writeCachedAccount(userDataDir, { email: leased.email, password: leased.password }, { fs })
     return {
       email: leased.email,
