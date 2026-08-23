@@ -1,2 +1,5 @@
 node_modules/
 dist/
+
+# 打包时注入的服务器地址 + 邀请码。仓库是公开的,绝不能进 git。
+client-config.json

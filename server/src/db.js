@@ -114,10 +114,13 @@ export function makeDb(d1) {
         .all()
       return results || []
     },
-    async createClient({ name, token_hash }) {
+    // enabled 默认 1:后台手工生成 token 是管理员的明确动作,当场可用。自助注册
+    // 必须显式传 0 —— 邀请码内置在公开可下载的安装包里,等于公开,批准这一步是
+    // 陌生人拿不到账号的唯一防线。
+    async createClient({ name, token_hash, enabled = 1 }) {
       const row = await d1
-        .prepare('INSERT INTO clients (name, token_hash) VALUES (?1,?2) RETURNING id')
-        .bind(name, token_hash)
+        .prepare('INSERT INTO clients (name, token_hash, enabled) VALUES (?1,?2,?3) RETURNING id')
+        .bind(name, token_hash, enabled ? 1 : 0)
         .first()
       return row.id
     },

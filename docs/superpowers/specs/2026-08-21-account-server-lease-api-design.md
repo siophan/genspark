@@ -163,8 +163,12 @@ token 校验:`sha256(token)` 命中 `clients.token_hash` 且 `enabled=1`,并更�
 
 改账号来源,新增 `src/account-source.js`,尽量不动现有 auto-login / partition 逻辑。
 
-- **配置**:userData 下 `server-config.json`,含 `{ apiBase, token }`。不硬编码进包
-  (dmg/exe 会被反编译)。缺失或字段为空时视为"未配置",走离线兜底。
+- **配置**:userData 下 `server-config.json`,含 `{ apiBase, token }`。缺失或字段
+  为空时视为"未配置",走离线兜底。
+  > 本节写于最初版本,当时的结论是"绝不硬编码进包(dmg/exe 会被反编译)"。后来
+  > 为了能把安装包直接发给别人,改成了包内带 `apiBase` + 邀请码、客户端自助领
+  > token —— 反编译能挖出邀请码这一点仍然成立,只是防线换成了"自助注册出来的
+  > 客户端默认停用"。见《客户端自助注册》一节,那里是当前的实现。
 - **`chooseAccount()` 改为 async**:
   1. 已配置 → `POST {apiBase}/api/lease`,拿 `{email, password, lease_id, expires_at}`。
   2. 成功 → 用现有 `partitionName(email)` + `buildLoginScript(email, password)` 拼成
@@ -250,6 +254,58 @@ Apple Silicon 会直接 SIGKILL,所以改成上面这套零额外依赖的方案
 
    `apiBase` **必须**是 `https://`。代码不做强制,而 `http://` 会让客户端 token
    和账号密码以明文走线路。尾部斜杠写不写都行(客户端会规范掉)。
+
+## 客户端自助注册(零配置分发)
+
+要把安装包直接发给别人用,原来那套"每人手工在 userData 里造一个
+`server-config.json`"是不可接受的:路径写错、JSON 少个逗号、token 粘串行,
+全都不报错,应用照常打开、只是永远不走 API。配错的表现和"没配"完全一样。
+
+改成客户端自助领取:
+
+1. 打包时把 `client-config.json`(`apiBase` + `registerCode`)放进包根目录
+   (`build.files` 里声明,`.gitignore` 掉真实文件,仓库里只有 `.example`)。
+2. 首次启动、本地没有 token 时,客户端 `POST /api/register`,带上邀请码和
+   `os.hostname()`。服务端建一条 client,**`enabled = 0`**,返回一个 token。
+3. 客户端把 token 存进 `userData/client-token.json`(0600),之后每次启动直接用。
+4. 管理员在后台看到 `⏳ 待批准`,点一下「开关」,这台机器下次启动即可自动登录。
+
+`{ apiBase, token }` 的解析优先级:手写的 `server-config.json` > 已存的
+`client-token.json` > 现场注册。第一条是排障和指向另一套部署的逃生口。
+
+### 两条不能动的规则
+
+**租号被 401 拒绝时绝不重新注册。** 客户端只在本地压根没有 token 时才注册。
+否则在后台停用一台机器,它下次启动自己再领一个新 token,吊销就形同虚设。
+
+**自助注册出来的 client 一律 `enabled = 0`。** 后台手工生成 token 是管理员的
+明确动作,当场可用(`db.createClient` 的 `enabled` 默认 1);自助注册必须显式
+传 0。这是下面那个取舍的唯一防线。
+
+### 取舍:邀请码事实上是公开的
+
+仓库是公开的,CI 每次 push 到 main 都把安装包发成 GitHub Release。任何人都能
+下载、解开 `app.asar`、读到邀请码。**所以邀请码只是防随手乱试,不是访问控制。**
+真正的门是"默认停用 + 管理员批准"。
+
+代价有两个,是已知且接受的:
+
+- 别人装好后第一次打开不会自动登录,要等批准、再重启一次。
+- 拿到邀请码的人可以往 `clients` 表里刷垃圾行(租不到账号,但会撑数据库)。
+  真被刷了,最快的止血是删掉 Cloudflare 上的 `REGISTER_CODE` —— 自助注册立刻
+  整体关闭,已批准的客户端不受影响。
+
+想要更强的隔离,只有把仓库转私有,让 Release 不再公开可下。
+
+### happy-eyeballs:客户端也踩同一个坑
+
+`src/main.js` 开头那行 `nodeNet.setDefaultAutoSelectFamilyAttemptTimeout(5000)`
+不是调优,是功能能否工作的前提。Electron 主进程的 `fetch` 就是 Node 的 undici,
+而 Node 默认只给每个候选地址 250ms 完成 TCP 握手;国内到 Cloudflare 实测 451ms,
+于是每个地址都超时,聚合成一个信息量为零的 `fetch failed`。客户端把它读作
+"服务器不可用",静默回落到桌面账号池 —— 功能看着装好了,却从来没生效过。
+这一行必须在任何请求发出之前执行。(同一个坑在部署章节里以 `NODE_OPTIONS`
+的形式打过一次,那是 wrangler CLI 侧。)
 
 ## 兼容 / 回滚
 

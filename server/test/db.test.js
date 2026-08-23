@@ -128,3 +128,22 @@ test('admin CRUD: create/list/update/delete account, create client', async () =>
   assert.ok(cid)
   assert.equal((await db.listClients()).length, 1)
 })
+
+test('createClient 默认启用,自助注册显式停用', async () => {
+  const db = makeDb(d1)
+  const a = await db.createClient({ name: 'manual', token_hash: 'h1' })
+  const b = await db.createClient({ name: 'auto:x', token_hash: 'h2', enabled: 0 })
+  const rows = await db.listClients()
+  assert.equal(rows.find((r) => r.id === a).enabled, 1)
+  assert.equal(rows.find((r) => r.id === b).enabled, 0)
+})
+
+test('停用的客户端拿着有效 token 也验不过', async () => {
+  const db = makeDb(d1)
+  const id = await db.createClient({ name: 'auto:x', token_hash: 'pending-hash', enabled: 0 })
+  assert.equal(await db.verifyClient('pending-hash', Date.now()), null)
+  // 批准之后才通
+  await db.setClientEnabled(id, true)
+  const ok = await db.verifyClient('pending-hash', Date.now())
+  assert.equal(ok.id, id)
+})

@@ -11,6 +11,12 @@ function esc(s) {
   }[ch]))
 }
 
+// 时间戳只用于展示。null 说明这个客户端从来没来过 —— 自助注册后还没被批准的样子。
+function stamp(ms) {
+  if (!ms) return '从未'
+  return new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+}
+
 function page(title, body) {
   return `<!doctype html><meta charset=utf-8><title>${esc(title)}</title>` +
     `<style>body{font-family:-apple-system,system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 16px}` +
@@ -64,7 +70,9 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
       `<form class=inline method=post action=/admin/accounts/${a.id}/toggle><button>开关</button></form> ` +
       `<form class=inline method=post action=/admin/accounts/${a.id}/delete><button>删</button></form></td></tr>`).join('')
     const crows = clients.map((cl) =>
-      `<tr><td>${cl.id}</td><td>${esc(cl.name)}</td><td>${cl.enabled ? '✓' : '✗'}</td><td>` +
+      `<tr><td>${cl.id}</td><td>${esc(cl.name)}</td>` +
+      `<td>${cl.enabled ? '✓' : (cl.last_seen_at ? '✗ 已停用' : '⏳ 待批准')}</td>` +
+      `<td>${esc(stamp(cl.last_seen_at))}</td><td>` +
       `<form class=inline method=post action=/admin/clients/${cl.id}/toggle><button>开关</button></form></td></tr>`).join('')
     return c.html(page('后台',
       '<h1>账号</h1>' +
@@ -73,7 +81,7 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
       `<table><tr><th>id<th>email<th>启用<th>租给<th>操作</tr>${arows}</table>` +
       '<h1>客户端</h1>' +
       '<form method=post action=/admin/clients><input name=name placeholder=名称><button>生成 token</button></form>' +
-      `<table><tr><th>id<th>名称<th>启用<th>操作</tr>${crows}</table>`))
+      `<table><tr><th>id<th>名称<th>状态<th>最后活动<th>操作</tr>${crows}</table>`))
   })
 
   app.post('/admin/accounts', async (c) => {

@@ -1,5 +1,13 @@
 const path = require('node:path')
+const nodeNet = require('node:net')
 const { app, shell, screen, BrowserWindow } = require('electron')
+
+// Node 的 happy-eyeballs 默认只给每个候选地址 250ms 完成 TCP 握手,超时就换下一个,
+// 全部超时后聚合成一个信息量为零的 `fetch failed`。国内到 Cloudflare 的握手实测
+// 451ms —— 也就是说账号服务器一次都连不上,而客户端会把它当成"服务器不可用",
+// 静默回落到桌面账号池:功能看起来装好了,却从来没生效过。这一行必须在任何请求
+// 发出之前执行。
+nodeNet.setDefaultAutoSelectFamilyAttemptTimeout(5000)
 
 const { scriptsDir, windowStateFile, ensureScriptDir } = require('./paths')
 const { serveScripts, pushCSS } = require('./script-bridge')

@@ -32,6 +32,28 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # 直接调 node 而不是 npm test:npm 在 Windows 上用 cmd.exe 跑脚本,而脚本里的
+      # 'test/*.test.js' 是单引号包住的 glob —— cmd 不认单引号,会把引号原样传给
+      # node,匹配不到任何文件。指定 bash 并绕开 npm 才稳。
+      - name: Run tests
+        shell: bash
+        run: node --test 'test/*.test.js'
+
+      # 服务器地址不是秘密(它靠 token 保护),邀请码是,所以只有后者走 secret。
+      # 仓库是公开的,这个包会发到公开 Release —— 邀请码事实上随包公开。防线在
+      # 服务端:自助注册出来的客户端默认停用,要在后台批准才能租号。
+      - name: Inject the client config
+        shell: bash
+        env:
+          REGISTER_CODE: ${{ secrets.REGISTER_CODE }}
+        run: |
+          if [ -z "$REGISTER_CODE" ]; then
+            echo "::error::REGISTER_CODE secret 没设置。继续构建只会产出一个不会自动登录的包,不如直接失败。"
+            exit 1
+          fi
+          # 用 node 写而不是 shell 拼接:邀请码是 base64,里面的 / + = 会被引号规则咬到。
+          node -e 'require("node:fs").writeFileSync("client-config.json", JSON.stringify({apiBase:"https://genspark-account-server.changingyin3.workers.dev",registerCode:process.env.REGISTER_CODE}))'
+
       - name: Build Windows package
         run: npx electron-builder --win --publish never
 

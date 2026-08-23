@@ -22,6 +22,7 @@ function makeFakeDbFactory(state) {
     async touchAccount() {},
     async renewLease({ leaseId }) { return leaseId === 501 ? 9999 : null },
     async releaseLease(args) { state.released = true; (state.releases ||= []).push(args) },
+    async createClient(args) { (state.created ||= []).push(args); return 77 },
   })
 }
 
@@ -131,4 +132,103 @@ test('POST /api/lease releases the lease when ACCOUNT_ENC_KEY has been rotated',
   assert.equal(state.released, true)
   assert.equal(res.status, 500)
   assert.equal((await res.json()).error, 'account_unreadable')
+})
+
+// ---- POST /api/register ----
+
+const regEnv = { ...env, REGISTER_CODE: 'invite-me' }
+
+test('register issues a token and stores only its hash', async () => {
+  const state = { tokenHash: await hashToken('t'), available: [] }
+  const app = await buildApp(state)
+  const res = await app.request(
+    '/api/register',
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'invite-me', device: 'mac-air' }) },
+    regEnv,
+  )
+  assert.equal(res.status, 200)
+  const body = await res.json()
+  assert.equal(typeof body.token, 'string')
+  assert.ok(body.token.length >= 32)
+  assert.equal(body.client_id, 77)
+  assert.equal(state.created.length, 1)
+  assert.equal(state.created[0].name, 'auto:mac-air')
+  // 自助注册必须默认停用 —— 邀请码随安装包公开,批准是唯一的门
+  assert.equal(state.created[0].enabled, 0)
+  assert.equal(body.pending, true)
+  // 库里存的必须是哈希,不是 token 本身
+  assert.equal(state.created[0].token_hash, await hashToken(body.token))
+  assert.notEqual(state.created[0].token_hash, body.token)
+})
+
+test('register rejects a wrong invite code', async () => {
+  const state = { tokenHash: await hashToken('t'), available: [] }
+  const app = await buildApp(state)
+  const res = await app.request(
+    '/api/register',
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'nope' }) },
+    regEnv,
+  )
+  assert.equal(res.status, 403)
+  assert.equal(state.created, undefined)
+})
+
+test('register is disabled when REGISTER_CODE is unset', async () => {
+  const state = { tokenHash: await hashToken('t'), available: [] }
+  const app = await buildApp(state)
+  // 没有 REGISTER_CODE 时,连正确的空码也不能放行
+  for (const body of [JSON.stringify({ code: '' }), JSON.stringify({}), '']) {
+    const res = await app.request(
+      '/api/register',
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body },
+      env,
+    )
+    assert.equal(res.status, 403)
+    assert.equal((await res.json()).error, 'registration_disabled')
+  }
+  assert.equal(state.created, undefined)
+})
+
+test('register needs no bearer token but every other /api route still does', async () => {
+  const state = { tokenHash: await hashToken('t'), available: [] }
+  const app = await buildApp(state)
+  const reg = await app.request(
+    '/api/register',
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'invite-me' }) },
+    regEnv,
+  )
+  assert.equal(reg.status, 200)
+  for (const route of ['/api/lease', '/api/renew', '/api/release']) {
+    const res = await app.request(route, { method: 'POST' }, regEnv)
+    assert.equal(res.status, 401, `${route} 必须仍然要 bearer`)
+  }
+})
+
+test('register falls back to a placeholder name and caps its length', async () => {
+  const state = { tokenHash: await hashToken('t'), available: [] }
+  const app = await buildApp(state)
+  await app.request('/api/register',
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'invite-me', device: '   ' }) }, regEnv)
+  assert.equal(state.created[0].name, 'auto:unknown')
+
+  await app.request('/api/register',
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'invite-me', device: 'x'.repeat(200) }) }, regEnv)
+  assert.equal(state.created[1].name, 'auto:' + 'x'.repeat(60))
+
+  // 非字符串的 device 不能让处理器抛
+  await app.request('/api/register',
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'invite-me', device: { evil: 1 } }) }, regEnv)
+  assert.equal(state.created[2].name, 'auto:unknown')
+})
+
+test('two registrations never issue the same token', async () => {
+  const state = { tokenHash: await hashToken('t'), available: [] }
+  const app = await buildApp(state)
+  const tokens = new Set()
+  for (let i = 0; i < 5; i++) {
+    const res = await app.request('/api/register',
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'invite-me' }) }, regEnv)
+    tokens.add((await res.json()).token)
+  }
+  assert.equal(tokens.size, 5)
 })

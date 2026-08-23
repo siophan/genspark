@@ -1,6 +1,6 @@
 import { makeDb as realMakeDb } from './db.js'
 import { leaseAccount } from './lease.js'
-import { hashToken } from './tokens.js'
+import { hashToken, generateToken } from './tokens.js'
 import { decryptPassword } from './crypto.js'
 
 function bearer(c) {
@@ -12,6 +12,8 @@ function bearer(c) {
 export function registerApiRoutes(app, { makeDb = realMakeDb } = {}) {
   // 鉴权中间件:校验 token,把 client 挂到 c.var
   app.use('/api/*', async (c, next) => {
+    // 注册是客户端拿到 token 之前唯一能走的路,它自己用邀请码把门,不能要 bearer。
+    if (c.req.path === '/api/register') return next()
     const token = bearer(c)
     if (!token) return c.json({ error: 'unauthorized' }, 401)
     const db = makeDb(c.env.DB)
@@ -20,6 +22,32 @@ export function registerApiRoutes(app, { makeDb = realMakeDb } = {}) {
     c.set('db', db)
     c.set('client', client)
     await next()
+  })
+
+  // 客户端首次启动时自助领取 token。邀请码内置在客户端包里,不进仓库。
+  app.post('/api/register', async (c) => {
+    const expected = c.env.REGISTER_CODE
+    // 没配 REGISTER_CODE 就等于关闭自助注册 —— 绝不能退化成"人人可注册"。
+    if (!expected) return c.json({ error: 'registration_disabled' }, 403)
+
+    const body = await c.req.json().catch(() => ({}))
+    const supplied = typeof body.code === 'string' ? body.code : ''
+    // 比对 sha256 而不是原文:字符串比较在第一个不同字节就早退,直接比原文等于把
+    // "前缀对了几位"通过耗时泄露出去,可被逐字节爆破。哈希之后攻击者无法构造有
+    // 意义的前缀,早退也就不携带信息了。
+    if ((await hashToken(supplied)) !== (await hashToken(expected))) {
+      return c.json({ error: 'forbidden' }, 403)
+    }
+
+    const raw = typeof body.device === 'string' ? body.device.trim() : ''
+    const device = (raw || 'unknown').slice(0, 60)
+    const token = await generateToken()
+    const db = makeDb(c.env.DB)
+    // enabled: 0 —— 领到 token 不等于能租号,要管理员在后台点一下才生效。
+    const id = await db.createClient({ name: `auto:${device}`, token_hash: await hashToken(token), enabled: 0 })
+    // token 只在这里出现这一次,库里只留哈希。客户端存不下来就只能重新注册。
+    // pending 是给人看的:客户端此刻拿着一个还不能租号的 token,这是正常状态。
+    return c.json({ token, client_id: id, pending: true })
   })
 
   app.post('/api/lease', async (c) => {

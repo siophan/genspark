@@ -5,7 +5,16 @@ const {
   serverConfigFile, cachedAccountFile,
   readServerConfig, readCachedAccount, writeCachedAccount,
   requestLease, renewLease, renewTrackedLeases, releaseLease, resolveRemoteAccount,
+  readBundledConfig, readClientToken, writeClientToken, registerClient, resolveConfig,
 } = require('../src/account-source')
+
+const BUNDLED = '/pkg/client-config.json'
+const fakeOs = { hostname: () => 'test-mac' }
+// resolveConfig 的默认参数会去读真实的打包配置路径,测试必须把它指到假路径,
+// 否则开发机上恰好存在 client-config.json 就会把测试结果染成"看情况"。
+function cfgOpts(fs, fetch, extra = {}) {
+  return { fs, fetch, os: fakeOs, bundledFile: BUNDLED, ...extra }
+}
 
 function fakeFs(files, writes = [], chmods = []) {
   return {
@@ -366,4 +375,155 @@ test('resolveRemoteAccount makes zero network calls when server-config.json is m
   const fetch = async () => { calls++; return jsonResponse(200, {}) }
   await resolveRemoteAccount('/u', { fetch, fs: fakeFs({ '/u/server-config.json': '{not json' }) })
   assert.equal(calls, 0)
+})
+
+// ---- 自助注册 ----
+
+test('readBundledConfig 缺文件/缺字段都返回 null', () => {
+  assert.equal(readBundledConfig({ fs: fakeFs({}), file: BUNDLED }), null)
+  const fs = fakeFs({ [BUNDLED]: JSON.stringify({ apiBase: 'https://x', registerCode: '' }) })
+  assert.equal(readBundledConfig({ fs, file: BUNDLED }), null)
+})
+
+test('readBundledConfig 规范掉尾部斜杠', () => {
+  const fs = fakeFs({ [BUNDLED]: JSON.stringify({ apiBase: 'https://x.dev///', registerCode: 'c' }) })
+  assert.deepEqual(readBundledConfig({ fs, file: BUNDLED }), { apiBase: 'https://x.dev', registerCode: 'c' })
+})
+
+test('writeClientToken 用 0600 并补 chmod', () => {
+  const files = {}, writes = [], chmods = []
+  const fs = fakeFs(files, writes, chmods)
+  assert.equal(writeClientToken('/u', 'tok', { fs }), true)
+  assert.equal(writes[0].opts.mode, 0o600)
+  assert.deepEqual(chmods, [{ p: '/u/client-token.json', mode: 0o600 }])
+  assert.equal(readClientToken('/u', { fs }), 'tok')
+})
+
+test('writeClientToken 写失败返回 false 而不抛', () => {
+  const fs = fakeFsWriteThrows({})
+  assert.equal(writeClientToken('/u', 'tok', { fs }), false)
+})
+
+test('readClientToken 忽略空的或非字符串的 token', () => {
+  for (const v of [{ token: '' }, { token: 123 }, {}]) {
+    const fs = fakeFs({ '/u/client-token.json': JSON.stringify(v) })
+    assert.equal(readClientToken('/u', { fs }), null)
+  }
+})
+
+test('首次启动:没有 token 就注册一个并落盘', async () => {
+  const files = { [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'code1' }) }
+  const writes = []
+  const fs = fakeFs(files, writes)
+  const calls = []
+  const fetch = async (url, init) => {
+    calls.push({ url, body: JSON.parse(init.body) })
+    return jsonResponse(200, { token: 'fresh-token', client_id: 9 })
+  }
+  const cfg = await resolveConfig('/u', cfgOpts(fs, fetch))
+  assert.deepEqual(cfg, { apiBase: 'https://s.dev', token: 'fresh-token' })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, 'https://s.dev/api/register')
+  assert.deepEqual(calls[0].body, { code: 'code1', device: 'test-mac' })
+  assert.equal(readClientToken('/u', { fs }), 'fresh-token')
+  assert.equal(writes.find((w) => w.p === '/u/client-token.json').opts.mode, 0o600)
+})
+
+test('第二次启动:已有 token 就不再注册', async () => {
+  const files = {
+    [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'code1' }),
+    '/u/client-token.json': JSON.stringify({ token: 'stored' }),
+  }
+  let called = 0
+  const fetch = async () => { called++; return jsonResponse(200, { token: 'should-not-happen' }) }
+  const cfg = await resolveConfig('/u', cfgOpts(fakeFs(files), fetch))
+  assert.deepEqual(cfg, { apiBase: 'https://s.dev', token: 'stored' })
+  assert.equal(called, 0, '已有 token 时不该发任何请求')
+})
+
+test('手写的 server-config.json 优先于内置配置,且不触发注册', async () => {
+  const files = {
+    '/u/server-config.json': JSON.stringify({ apiBase: 'https://manual.dev/', token: 'manual-tok' }),
+    [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'code1' }),
+  }
+  let called = 0
+  const fetch = async () => { called++; return jsonResponse(200, { token: 'x' }) }
+  const cfg = await resolveConfig('/u', cfgOpts(fakeFs(files), fetch))
+  assert.deepEqual(cfg, { apiBase: 'https://manual.dev', token: 'manual-tok' })
+  assert.equal(called, 0)
+})
+
+test('注册失败(邀请码被拒)不抛,返回 null,不写 token', async () => {
+  const files = { [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'bad' }) }
+  const fs = fakeFs(files)
+  const fetch = async () => jsonResponse(403, { error: 'forbidden' })
+  assert.equal(await resolveConfig('/u', cfgOpts(fs, fetch)), null)
+  assert.equal(readClientToken('/u', { fs }), null)
+})
+
+test('注册时离线不抛,返回 null', async () => {
+  const files = { [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'c' }) }
+  const fetch = async () => { throw new Error('offline') }
+  assert.equal(await resolveConfig('/u', cfgOpts(fakeFs(files), fetch)), null)
+})
+
+test('注册返回 200 但 body 里没有 token,视为失败', async () => {
+  const files = { [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'c' }) }
+  const fs = fakeFs(files)
+  for (const body of [{}, { token: '' }, { token: 42 }]) {
+    const fetch = async () => jsonResponse(200, body)
+    assert.equal(await resolveConfig('/u', cfgOpts(fs, fetch)), null)
+    assert.equal(readClientToken('/u', { fs }), null)
+  }
+})
+
+test('没有内置配置时不注册也不报错(等于退回纯本地模式)', async () => {
+  let called = 0
+  const fetch = async () => { called++; return jsonResponse(200, { token: 't' }) }
+  assert.equal(await resolveConfig('/u', cfgOpts(fakeFs({}), fetch)), null)
+  assert.equal(called, 0)
+})
+
+test('租号被 401 拒绝时绝不重新注册', async () => {
+  // 这条是吊销能力的命门:后台停用一台机器后,它下次启动必须仍然被拒,
+  // 而不是自己去领一个新 token 把停用绕过去。
+  const files = {
+    [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'c' }),
+    '/u/client-token.json': JSON.stringify({ token: 'revoked' }),
+  }
+  const fs = fakeFs(files)
+  const hits = []
+  const fetch = async (url) => {
+    hits.push(url)
+    return jsonResponse(401, { error: 'unauthorized' })
+  }
+  const got = await resolveRemoteAccount('/u', cfgOpts(fs, fetch))
+  assert.equal(got, null)
+  assert.deepEqual(hits, ['https://s.dev/api/lease'], '只该试一次租号,绝不能再打 /api/register')
+  assert.equal(readClientToken('/u', { fs }), 'revoked', 'token 不该被换掉')
+})
+
+test('token 落盘失败时,本次仍然可用', async () => {
+  const files = { [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'c' }) }
+  const fs = fakeFsWriteThrows(files)
+  const fetch = async () => jsonResponse(200, { token: 'fresh' })
+  const cfg = await resolveConfig('/u', cfgOpts(fs, fetch))
+  assert.deepEqual(cfg, { apiBase: 'https://s.dev', token: 'fresh' })
+})
+
+test('端到端:零配置启动应当注册 → 租号 → 缓存账号', async () => {
+  const files = { [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'c' }) }
+  const fs = fakeFs(files)
+  const seen = []
+  const fetch = async (url) => {
+    seen.push(url)
+    if (url.endsWith('/api/register')) return jsonResponse(200, { token: 'tok-1' })
+    if (url.endsWith('/api/lease')) return jsonResponse(200, { email: 'a@x.com', password: 'pw', lease_id: 7, expires_at: 123 })
+    throw new Error('unexpected ' + url)
+  }
+  const got = await resolveRemoteAccount('/u', cfgOpts(fs, fetch))
+  assert.deepEqual(seen, ['https://s.dev/api/register', 'https://s.dev/api/lease'])
+  assert.equal(got.email, 'a@x.com')
+  assert.deepEqual(got.lease, { apiBase: 'https://s.dev', token: 'tok-1', leaseId: 7, expiresAt: 123 })
+  assert.deepEqual(readCachedAccount('/u', { fs }), { email: 'a@x.com', password: 'pw' })
 })

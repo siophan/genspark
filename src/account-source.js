@@ -1,8 +1,13 @@
 const fsDefault = require('node:fs')
+const osDefault = require('node:os')
 const path = require('node:path')
 
 function serverConfigFile(userDataDir) { return path.join(userDataDir, 'server-config.json') }
 function cachedAccountFile(userDataDir) { return path.join(userDataDir, 'cached-account.json') }
+function clientTokenFile(userDataDir) { return path.join(userDataDir, 'client-token.json') }
+// 打包后落在 app.asar 根目录(src/ 的上一级),开发态就是仓库根。里面是服务器地址
+// 和邀请码,由打包流程生成,不进仓库 —— 仓库是公开的。
+function bundledConfigFile() { return path.join(__dirname, '..', 'client-config.json') }
 
 function readServerConfig(userDataDir, { fs = fsDefault } = {}) {
   try {
@@ -15,6 +20,37 @@ function readServerConfig(userDataDir, { fs = fsDefault } = {}) {
     if (!apiBase || !c.token) return null
     return { apiBase, token: c.token }
   } catch { return null }
+}
+
+function readBundledConfig({ fs = fsDefault, file = bundledConfigFile() } = {}) {
+  try {
+    const c = JSON.parse(fs.readFileSync(file, 'utf8'))
+    // 与 readServerConfig 同样规范尾部斜杠,理由见那里。
+    const apiBase = String(c.apiBase || '').replace(/\/+$/, '')
+    if (!apiBase || !c.registerCode) return null
+    return { apiBase, registerCode: c.registerCode }
+  } catch { return null }
+}
+
+function readClientToken(userDataDir, { fs = fsDefault } = {}) {
+  try {
+    const c = JSON.parse(fs.readFileSync(clientTokenFile(userDataDir), 'utf8'))
+    return typeof c.token === 'string' && c.token ? c.token : null
+  } catch { return null }
+}
+
+function writeClientToken(userDataDir, token, { fs = fsDefault } = {}) {
+  // 0600:这是这台机器的通行证,同机别的用户不该读得到。理由同 writeCachedAccount,
+  // mode 只在创建时生效,所以照样补一次 chmod。
+  const file = clientTokenFile(userDataDir)
+  try { fs.writeFileSync(file, JSON.stringify({ token }), { mode: 0o600 }) }
+  catch (e) {
+    // 存不下来不该让这次启动失败 —— 本次照常用,只是下次会重新注册一个。
+    console.error('[account-source] token write failed:', e.message)
+    return false
+  }
+  try { fs.chmodSync(file, 0o600) } catch {}
+  return true
 }
 
 function readCachedAccount(userDataDir, { fs = fsDefault } = {}) {
@@ -107,9 +143,42 @@ async function releaseLease({ apiBase, token, leaseId }, { fetch = globalThis.fe
   await post(apiBase, '/api/release', token, { lease_id: leaseId }, fetch)
 }
 
+async function registerClient({ apiBase, registerCode, device }, { fetch = globalThis.fetch } = {}) {
+  // 这是唯一不需要 bearer 的请求。post() 仍会带一个空的 Authorization 头,服务端
+  // 在这条路由上不看它 —— 为一个请求另写一套发送逻辑不值得。
+  const r = await post(apiBase, '/api/register', '', { code: registerCode, device }, fetch)
+  return r.ok && r.body && typeof r.body.token === 'string' && r.body.token ? r.body.token : null
+}
+
+// 解出这台机器该用的 { apiBase, token }。三条来源,优先级从高到低:
+//   1. 手写的 server-config.json —— 排障和指向另一套部署的逃生口
+//   2. 已经注册过、存在本地的 token
+//   3. 用内置邀请码现场注册一个
+async function resolveConfig(userDataDir, opts = {}) {
+  const { fs = fsDefault, fetch = globalThis.fetch, os = osDefault, bundledFile = bundledConfigFile() } = opts
+  const manual = readServerConfig(userDataDir, { fs })
+  if (manual) return manual
+
+  const bundled = readBundledConfig({ fs, file: bundledFile })
+  if (!bundled) return null
+
+  const existing = readClientToken(userDataDir, { fs })
+  if (existing) return { apiBase: bundled.apiBase, token: existing }
+
+  // 只有在本地压根没有 token 时才走到这里。租号被 401 拒绝时绝不能触发注册 ——
+  // 否则在后台停用一台机器,它下次启动自己再领一个新 token,吊销就形同虚设。
+  let device = 'unknown'
+  try { device = String(os.hostname() || 'unknown') } catch {}
+  const token = await registerClient({ ...bundled, device }, { fetch })
+  if (!token) return null
+  writeClientToken(userDataDir, token, { fs })
+  return { apiBase: bundled.apiBase, token }
+}
+
 // 远端优先;失败回落本地缓存(lease=null,表示无需续租);都没有返回 null。
-async function resolveRemoteAccount(userDataDir, { fetch = globalThis.fetch, fs = fsDefault } = {}) {
-  const cfg = readServerConfig(userDataDir, { fs })
+async function resolveRemoteAccount(userDataDir, opts = {}) {
+  const { fetch = globalThis.fetch, fs = fsDefault } = opts
+  const cfg = await resolveConfig(userDataDir, opts)
   if (!cfg) return null
   const leased = await requestLease(cfg, { fetch })
   // A 200 is not the same as a usable account: a half-deployed Worker, or an
@@ -131,8 +200,9 @@ async function resolveRemoteAccount(userDataDir, { fetch = globalThis.fetch, fs 
 }
 
 module.exports = {
-  serverConfigFile, cachedAccountFile,
+  serverConfigFile, cachedAccountFile, clientTokenFile, bundledConfigFile,
   readServerConfig, readCachedAccount, writeCachedAccount,
+  readBundledConfig, readClientToken, writeClientToken, registerClient, resolveConfig,
   requestLease, renewLease, renewTrackedLeases, releaseLease, resolveRemoteAccount,
   LEASE_RENEWED, LEASE_GONE, LEASE_RETRY,
 }
