@@ -10,7 +10,12 @@ const KEY = Buffer.alloc(32).toString('base64')
 // 内存假 db:一个可用账号 + 一个已知 token
 function makeFakeDbFactory(state) {
   return () => ({
-    async verifyClient(hash) { return hash === state.tokenHash ? { id: 42 } : null },
+    async verifyClient(hash) {
+      if (hash === state.tokenHash) return { id: 42 }
+      // 注册出来的 client 也要能通过校验,否则测不出"注册完能不能立刻租号"
+      const made = (state.created || []).find((c) => c.token_hash === hash)
+      return made && made.enabled !== 0 ? { id: 77 } : null
+    },
     async availableAccounts() { return state.available.slice() },
     async lastAccountIdForClient() { return null },
     async claimAccount({ accountId }) {
@@ -153,9 +158,8 @@ test('register issues a token and stores only its hash', async () => {
   assert.equal(body.client_id, 77)
   assert.equal(state.created.length, 1)
   assert.equal(state.created[0].name, 'auto:mac-air')
-  // 自助注册必须默认停用 —— 邀请码随安装包公开,批准是唯一的门
-  assert.equal(state.created[0].enabled, 0)
-  assert.equal(body.pending, true)
+  // 不能带着 enabled: 0 建行 —— 那会让新装的客户端第一次打开租不到号
+  assert.notEqual(state.created[0].enabled, 0)
   // 库里存的必须是哈希,不是 token 本身
   assert.equal(state.created[0].token_hash, await hashToken(body.token))
   assert.notEqual(state.created[0].token_hash, body.token)
@@ -231,4 +235,34 @@ test('two registrations never issue the same token', async () => {
     tokens.add((await res.json()).token)
   }
   assert.equal(tokens.size, 5)
+})
+
+test('注册拿到的 token 立刻就能租号', async () => {
+  const enc = await encryptPassword('pw', KEY)
+  const state = { tokenHash: await hashToken('other'), available: [{ id: 1, email: 'a@x.com', password_enc: enc }] }
+  const app = await buildApp(state)
+  const reg = await app.request('/api/register',
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'invite-me', device: 'brand-new' }) }, regEnv)
+  const { token } = await reg.json()
+
+  const lease = await app.request('/api/lease',
+    { method: 'POST', headers: { Authorization: 'Bearer ' + token } }, regEnv)
+  assert.equal(lease.status, 200, '刚注册的客户端必须能直接租到号')
+  assert.equal((await lease.json()).email, 'a@x.com')
+})
+
+test('后台停用之后,同一个 token 立刻失效', async () => {
+  const enc = await encryptPassword('pw', KEY)
+  const state = { tokenHash: await hashToken('other'), available: [{ id: 1, email: 'a@x.com', password_enc: enc }] }
+  const app = await buildApp(state)
+  const reg = await app.request('/api/register',
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'invite-me' }) }, regEnv)
+  const { token } = await reg.json()
+
+  // 模拟管理员在后台点了停用
+  state.created[0].enabled = 0
+
+  const lease = await app.request('/api/lease',
+    { method: 'POST', headers: { Authorization: 'Bearer ' + token } }, regEnv)
+  assert.equal(lease.status, 401, '停用必须立刻生效 —— 这是现在唯一的管控手段')
 })

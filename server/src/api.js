@@ -43,11 +43,12 @@ export function registerApiRoutes(app, { makeDb = realMakeDb } = {}) {
     const device = (raw || 'unknown').slice(0, 60)
     const token = await generateToken()
     const db = makeDb(c.env.DB)
-    // enabled: 0 —— 领到 token 不等于能租号,要管理员在后台点一下才生效。
-    const id = await db.createClient({ name: `auto:${device}`, token_hash: await hashToken(token), enabled: 0 })
+    // 自助注册出来的客户端直接可用。注意这条的代价:邀请码随公开 Release 分发,
+    // 等于公开,所以这里没有任何一道门 —— 拿到安装包的人就能租号。管控是事后的:
+    // 在后台把某个 client 停用,或者删掉 REGISTER_CODE 整体关闭自助注册。
+    const id = await db.createClient({ name: `auto:${device}`, token_hash: await hashToken(token) })
     // token 只在这里出现这一次,库里只留哈希。客户端存不下来就只能重新注册。
-    // pending 是给人看的:客户端此刻拿着一个还不能租号的 token,这是正常状态。
-    return c.json({ token, client_id: id, pending: true })
+    return c.json({ token, client_id: id })
   })
 
   app.post('/api/lease', async (c) => {

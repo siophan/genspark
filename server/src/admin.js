@@ -71,7 +71,7 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
       `<form class=inline method=post action=/admin/accounts/${a.id}/delete><button>删</button></form></td></tr>`).join('')
     const crows = clients.map((cl) =>
       `<tr><td>${cl.id}</td><td>${esc(cl.name)}</td>` +
-      `<td>${cl.enabled ? '✓' : (cl.last_seen_at ? '✗ 已停用' : '⏳ 待批准')}</td>` +
+      `<td>${cl.enabled ? '✓' : '✗ 已停用'}</td>` +
       `<td>${esc(stamp(cl.last_seen_at))}</td><td>` +
       `<form class=inline method=post action=/admin/clients/${cl.id}/toggle><button>开关</button></form></td></tr>`).join('')
     return c.html(page('后台',

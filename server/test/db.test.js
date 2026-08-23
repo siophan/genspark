@@ -129,7 +129,7 @@ test('admin CRUD: create/list/update/delete account, create client', async () =>
   assert.equal((await db.listClients()).length, 1)
 })
 
-test('createClient 默认启用,自助注册显式停用', async () => {
+test('createClient 默认启用,也可显式停用', async () => {
   const db = makeDb(d1)
   const a = await db.createClient({ name: 'manual', token_hash: 'h1' })
   const b = await db.createClient({ name: 'auto:x', token_hash: 'h2', enabled: 0 })
