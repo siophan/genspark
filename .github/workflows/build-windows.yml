@@ -32,12 +32,13 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # 直接调 node 而不是 npm test:npm 在 Windows 上用 cmd.exe 跑脚本,而脚本里的
-      # 'test/*.test.js' 是单引号包住的 glob —— cmd 不认单引号,会把引号原样传给
-      # node,匹配不到任何文件。指定 bash 并绕开 npm 才稳。
+      # 绕开 npm test:npm 在 Windows 上用 cmd.exe 跑脚本,cmd 不认脚本里那对单引号,
+      # 会把引号原样传给 node。glob 也不能加引号 —— 自己展开 glob 是 Node 21+ 才有的
+      # 能力,runner 上是 Node 20,引号一挡 bash 也不展开,结果就是"找不到测试文件"。
+      # 不加引号交给 bash 展开,与 Node 版本无关。
       - name: Run tests
         shell: bash
-        run: node --test 'test/*.test.js'
+        run: node --test test/*.test.js
 
       # 服务器地址不是秘密(它靠 token 保护),邀请码是,所以只有后者走 secret。
       # 仓库是公开的,这个包会发到公开 Release —— 邀请码事实上随包公开。防线在
