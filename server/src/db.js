@@ -75,14 +75,22 @@ export function makeDb(d1) {
       return { id: row.id }
     },
 
+    // 带上 leased_by_id:客户端名字允许为空(后台生成 token 时不填就是空的),
+    // 只回名字的话"租给了一个没名字的客户端"和"没租出去"在后台是同一个空格子。
     async listAccounts() {
       const { results } = await d1
         .prepare(
           `SELECT a.id, a.email, a.enabled, a.note, a.last_used_at,
-                  (SELECT c.name FROM leases l JOIN clients c ON c.id = l.client_id
-                    WHERE l.account_id = a.id AND l.released_at IS NULL AND l.expires_at > ?1
-                    ORDER BY l.id DESC LIMIT 1) AS leased_by
-             FROM accounts a ORDER BY a.id`,
+                  l.client_id  AS leased_by_id,
+                  c.name       AS leased_by,
+                  l.expires_at AS lease_expires_at
+             FROM accounts a
+             LEFT JOIN leases l
+                    ON l.id = (SELECT id FROM leases
+                                WHERE account_id = a.id AND released_at IS NULL AND expires_at > ?1
+                                ORDER BY id DESC LIMIT 1)
+             LEFT JOIN clients c ON c.id = l.client_id
+            ORDER BY a.id`,
         )
         .bind(Date.now())
         .all()
@@ -105,12 +113,48 @@ export function makeDb(d1) {
       vals.push(id)
       await d1.prepare(`UPDATE accounts SET ${sets.join(', ')} WHERE id = ?`).bind(...vals).run()
     },
-    async deleteAccount(id) {
-      await d1.prepare('DELETE FROM accounts WHERE id = ?1').bind(id).run()
+    // 返回 true 才是真删掉了。两件事绕不开:
+    // 1) leases.account_id 有外键、D1 默认开外键检查,不先清租约,DELETE accounts 直接报
+    //    FOREIGN KEY constraint failed —— 越常用的账号越删不掉。
+    // 2) 正被持有的账号不能删:客户端手上攥着凭据,会继续用一个后台已经不存在的号。
+    //    条件 DELETE 兜住"检查完到删之间刚好被人租走"的窗口 —— 那一瞬间账号会留下来。
+    async deleteAccount(id, now = Date.now()) {
+      await d1
+        .prepare(
+          `DELETE FROM leases
+             WHERE account_id = ?1 AND (released_at IS NOT NULL OR expires_at <= ?2)`,
+        )
+        .bind(id, now)
+        .run()
+      const row = await d1
+        .prepare(
+          `DELETE FROM accounts
+             WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM leases
+                                WHERE account_id = ?1 AND released_at IS NULL AND expires_at > ?2)
+           RETURNING id`,
+        )
+        .bind(id, now)
+        .first()
+      return row != null
     },
+    // 取最后一条租约(不是最后一条"有效"租约):已归还的也要显示,不然客户端一退出
+    // 后台就再也看不出它刚才用的是哪个号,排查串号问题时无从下手。是否仍然持有由
+    // released_at / expires_at 判断,交给调用方渲染。
     async listClients() {
       const { results } = await d1
-        .prepare('SELECT id, name, enabled, last_seen_at FROM clients ORDER BY id')
+        .prepare(
+          `SELECT c.id, c.name, c.enabled, c.last_seen_at,
+                  l.account_id  AS last_account_id,
+                  l.expires_at  AS last_expires_at,
+                  l.released_at AS last_released_at,
+                  a.email       AS last_account_email
+             FROM clients c
+             LEFT JOIN leases l
+                    ON l.id = (SELECT id FROM leases WHERE client_id = c.id ORDER BY id DESC LIMIT 1)
+             LEFT JOIN accounts a ON a.id = l.account_id
+            ORDER BY c.id`,
+        )
         .all()
       return results || []
     },

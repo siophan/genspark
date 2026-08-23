@@ -27,6 +27,9 @@ function d1Shim(sqlite) {
 let d1
 beforeEach(() => {
   const sqlite = new DatabaseSync(':memory:')
+  // D1 默认开启外键检查,node:sqlite 默认关闭。不打开的话 leases → accounts 的外键
+  // 在本地形同虚设,"删一个租过的账号"这种线上会 500 的操作在测试里一路绿灯。
+  sqlite.exec('PRAGMA foreign_keys = ON')
   sqlite.exec(schema)
   d1 = d1Shim(sqlite)
 })
@@ -146,4 +149,75 @@ test('停用的客户端拿着有效 token 也验不过', async () => {
   await db.setClientEnabled(id, true)
   const ok = await db.verifyClient('pending-hash', Date.now())
   assert.equal(ok.id, id)
+})
+
+// 后台要回答"哪个客户端占着哪个账号"。名字为空的客户端(后台生成 token 时不填名字)
+// 只回名字的话,那一格是空的 —— 和"没租出去"分不清,所以必须带 id。
+test('listAccounts 报出持有者的 id、名字和到期时间', async () => {
+  const db = makeDb(d1)
+  const acc = await seedAccount('held@x.com')
+  const free = await seedAccount('free@x.com')
+  const anon = await seedClient('', 'h-anon')
+  await db.claimAccount({ accountId: acc, clientId: anon, expiresAt: Date.now() + 60000, now: Date.now() })
+
+  const rows = await db.listAccounts()
+  const held = rows.find((r) => r.id === acc)
+  assert.equal(held.leased_by_id, anon)
+  assert.equal(held.leased_by, '')
+  assert.ok(held.lease_expires_at > Date.now())
+
+  const idle = rows.find((r) => r.id === free)
+  assert.equal(idle.leased_by_id, null)
+  assert.equal(idle.lease_expires_at, null)
+})
+
+// 归还之后仍要看得见最后用的是哪个号,否则客户端一退出就再也查不了串号问题。
+test('listClients 报出最后一条租约,归还后也还在', async () => {
+  const db = makeDb(d1)
+  const acc = await seedAccount('a@x.com')
+  const cid = await seedClient('mac-mini', 'h-mac')
+  const virgin = await seedClient('never-leased', 'h-virgin')
+  const now = Date.now()
+  const leaseId = await db.claimAccount({ accountId: acc, clientId: cid, expiresAt: now + 60000, now })
+
+  let row = (await db.listClients()).find((c) => c.id === cid)
+  assert.equal(row.last_account_id, acc)
+  assert.equal(row.last_account_email, 'a@x.com')
+  assert.equal(row.last_released_at, null)
+
+  await db.releaseLease({ leaseId, clientId: cid, now: now + 1000 })
+  row = (await db.listClients()).find((c) => c.id === cid)
+  assert.equal(row.last_account_email, 'a@x.com')
+  assert.equal(row.last_released_at, now + 1000)
+
+  const none = (await db.listClients()).find((c) => c.id === virgin)
+  assert.equal(none.last_account_id, null)
+})
+
+// leases.account_id 有外键。D1 默认开外键检查,所以"删一个租过的账号"在后台会直接
+// 500 —— 而且是越常用的账号越删不掉。
+test('deleteAccount 能删掉有历史租约的账号', async () => {
+  const db = makeDb(d1)
+  const acc = await seedAccount('used@x.com')
+  const cid = await seedClient('c', 'h')
+  const now = Date.now()
+  const leaseId = await db.claimAccount({ accountId: acc, clientId: cid, expiresAt: now + 1000, now })
+  await db.releaseLease({ leaseId, clientId: cid, now: now + 1 })
+
+  assert.equal(await db.deleteAccount(acc, now + 2), true)
+  assert.equal((await db.listAccounts()).length, 0)
+  const { results } = await d1.prepare('SELECT id FROM leases WHERE account_id = ?').bind(acc).all()
+  assert.equal(results.length, 0, '账号没了,它的租约也不该留成孤儿')
+})
+
+// 正被人用着的账号删掉,客户端会抱着一个后台已经不存在的号继续跑。先停用,等它自己还。
+test('deleteAccount 拒绝删掉正被持有的账号', async () => {
+  const db = makeDb(d1)
+  const acc = await seedAccount('busy@x.com')
+  const cid = await seedClient('c', 'h')
+  const now = Date.now()
+  await db.claimAccount({ accountId: acc, clientId: cid, expiresAt: now + 60000, now })
+
+  assert.equal(await db.deleteAccount(acc, now), false)
+  assert.equal((await db.listAccounts()).length, 1, '账号还在')
 })

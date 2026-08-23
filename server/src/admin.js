@@ -17,6 +17,31 @@ function stamp(ms) {
   return new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
 }
 
+// 客户端名字可以为空,所以标签永远带上 id —— 后台要能一眼分清是哪台机器。
+function clientLabel(id, name) {
+  const n = String(name ?? '').trim()
+  if (id == null) return n
+  return n ? `#${id} ${n}` : `#${id}`
+}
+
+// 账号那一列:租出去了就写"谁 + 到期时间",没租出去留空。
+function holderCell(a) {
+  if (a.leased_by_id == null && !a.leased_by) return ''
+  const who = esc(clientLabel(a.leased_by_id, a.leased_by))
+  return a.lease_expires_at ? `${who}<br><small>到期 ${esc(stamp(a.lease_expires_at))}</small>` : who
+}
+
+// 客户端那一列:仍持有就写账号 + 到期,已归还/已过期就写"曾用",从来没租过写 —。
+// 账号被删掉时 email 是 null,退回 #id,免得整格空掉。
+function heldAccountCell(cl, now) {
+  if (cl.last_account_id == null) return '—'
+  const label = esc(cl.last_account_email || `#${cl.last_account_id}`)
+  const held = !cl.last_released_at && Number(cl.last_expires_at) > now
+  return held
+    ? `${label}<br><small>到期 ${esc(stamp(cl.last_expires_at))}</small>`
+    : `<small>曾用 ${label}</small>`
+}
+
 function page(title, body) {
   return `<!doctype html><meta charset=utf-8><title>${esc(title)}</title>` +
     `<style>body{font-family:-apple-system,system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 16px}` +
@@ -64,14 +89,16 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
     const db = makeDb(c.env.DB)
     const accounts = await db.listAccounts()
     const clients = await db.listClients()
+    const now = Date.now()
     const arows = accounts.map((a) =>
       `<tr><td>${a.id}</td><td>${esc(a.email)}</td><td>${a.enabled ? '✓' : '✗'}</td>` +
-      `<td>${esc(a.leased_by || '')}</td><td>` +
+      `<td>${holderCell(a)}</td><td>` +
       `<form class=inline method=post action=/admin/accounts/${a.id}/toggle><button>开关</button></form> ` +
       `<form class=inline method=post action=/admin/accounts/${a.id}/delete><button>删</button></form></td></tr>`).join('')
     const crows = clients.map((cl) =>
       `<tr><td>${cl.id}</td><td>${esc(cl.name)}</td>` +
       `<td>${cl.enabled ? '✓' : '✗ 已停用'}</td>` +
+      `<td>${heldAccountCell(cl, now)}</td>` +
       `<td>${esc(stamp(cl.last_seen_at))}</td><td>` +
       `<form class=inline method=post action=/admin/clients/${cl.id}/toggle><button>开关</button></form></td></tr>`).join('')
     return c.html(page('后台',
@@ -81,7 +108,7 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
       `<table><tr><th>id<th>email<th>启用<th>租给<th>操作</tr>${arows}</table>` +
       '<h1>客户端</h1>' +
       '<form method=post action=/admin/clients><input name=name placeholder=名称><button>生成 token</button></form>' +
-      `<table><tr><th>id<th>名称<th>状态<th>最后活动<th>操作</tr>${crows}</table>`))
+      `<table><tr><th>id<th>名称<th>状态<th>账号<th>最后活动<th>操作</tr>${crows}</table>`))
   })
 
   app.post('/admin/accounts', async (c) => {
@@ -108,8 +135,20 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
     return c.redirect('/admin', 302)
   })
   app.post('/admin/accounts/:id/delete', async (c) => {
-    await makeDb(c.env.DB).deleteAccount(Number(c.req.param('id')))
-    return c.redirect('/admin', 302)
+    const db = makeDb(c.env.DB)
+    const id = Number(c.req.param('id'))
+    const a = (await db.listAccounts()).find((x) => x.id === id)
+    // 已经不在了就当删过了,别拿"删不掉"糊操作员一脸。
+    if (!a) return c.redirect('/admin', 302)
+    // 先读一眼是想在常见情况下早退,不白清一遍历史租约;真正把关的是 deleteAccount 里
+    // 那条条件 DELETE —— 只有它防得住"读完到删之间刚好被人租走"。
+    if (a.leased_by_id == null && (await db.deleteAccount(id))) return c.redirect('/admin', 302)
+    const who = clientLabel(a.leased_by_id, a.leased_by) || '另一个客户端'
+    return c.html(page('删不掉',
+      `<p>账号 <b>${esc(a.email)}</b> 正被 <b>${esc(who)}</b> 持有。删掉它,那个客户端` +
+      '会抱着一份后台已经不存在的凭据继续跑。</p>' +
+      '<p>先点"开关"停用它 —— 停用之后不会再被租出去,等这一轮租约归还或到期' +
+      '(最长 30 分钟)再删。</p><a href=/admin>返回</a>'), 409)
   })
 
   app.post('/admin/clients', async (c) => {

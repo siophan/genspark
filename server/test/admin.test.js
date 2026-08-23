@@ -29,10 +29,13 @@ function fakeDbFactory() {
       const a = accounts.find((x) => x.id === id)
       if (a) Object.assign(a, fields)
     },
+    // 跟真实实现同一份契约:被持有就删不掉,返回 false。
     async deleteAccount(id) {
       calls.deleteAccount.push(id)
       const i = accounts.findIndex((a) => a.id === id)
-      if (i >= 0) accounts.splice(i, 1)
+      if (i < 0 || accounts[i].leased_by_id != null) return false
+      accounts.splice(i, 1)
+      return true
     },
     async listClients() { return clients },
     async createClient({ name, token_hash }) {
@@ -237,4 +240,55 @@ test('POST /admin/accounts still creates a valid account, with the email trimmed
   assert.equal(res.status, 302)
   assert.equal(state.calls.createAccount.length, 1)
   assert.equal(state.calls.createAccount[0].email, 'a@x.com')
+})
+
+test('GET /admin 两张表互相指认:账号写持有者,客户端写账号', async () => {
+  const { app, state } = buildApp()
+  const soon = Date.now() + 60000
+  // 名字为空的客户端:只渲染名字的话这一格是空的,和"没租出去"分不清。
+  state.accounts.push({ id: 7, email: 'held@x.com', enabled: 1, leased_by_id: 4, leased_by: '', lease_expires_at: soon })
+  state.accounts.push({ id: 8, email: 'free@x.com', enabled: 1, leased_by_id: null, leased_by: null, lease_expires_at: null })
+  state.clients.push({
+    id: 4, name: '', enabled: 1, last_seen_at: Date.now(),
+    last_account_id: 7, last_account_email: 'held@x.com', last_expires_at: soon, last_released_at: null,
+  })
+  state.clients.push({
+    id: 5, name: 'macbook', enabled: 1, last_seen_at: Date.now(),
+    last_account_id: 9, last_account_email: 'gone@x.com', last_expires_at: soon, last_released_at: Date.now(),
+  })
+  state.clients.push({ id: 6, name: 'fresh', enabled: 1, last_seen_at: null, last_account_id: null })
+
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const cookie = await login(app, e)
+  const html = await (await app.request('/admin', { headers: { cookie } }, e)).text()
+
+  assert.match(html, /#4/, '空名字的持有者要靠 id 认出来')
+  assert.match(html, /held@x\.com/)
+  assert.match(html, /曾用 gone@x\.com/, '已归还的租约仍要看得见')
+  assert.match(html, /—/, '从没租过的客户端画横杠而不是空格')
+  assert.ok(!/free@x\.com<\/td><td>#/.test(html), '空闲账号不该有持有者')
+})
+
+test('POST /admin/accounts/:id/delete 挡住正被持有的账号,并说清怎么办', async () => {
+  const { app, state } = buildApp()
+  state.accounts.push({ id: 1, email: 'busy@x.com', enabled: 1, leased_by_id: 4, leased_by: '' })
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const cookie = await login(app, e)
+
+  const res = await app.request('/admin/accounts/1/delete', { method: 'POST', headers: { cookie } }, e)
+  assert.equal(res.status, 409)
+  assert.deepEqual(state.calls.deleteAccount, [], '被持有时连删都不该试,免得白清历史租约')
+  assert.equal(state.accounts.length, 1)
+  const html = await res.text()
+  assert.match(html, /#4/, '要指名道姓是谁占着')
+  assert.match(html, /停用/, '要告诉操作员下一步怎么走')
+})
+
+test('POST /admin/accounts/:id/delete 删一个已经不存在的账号不报错', async () => {
+  const { app, state } = buildApp()
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const cookie = await login(app, e)
+  const res = await app.request('/admin/accounts/99/delete', { method: 'POST', headers: { cookie } }, e)
+  assert.equal(res.status, 302)
+  assert.deepEqual(state.calls.deleteAccount, [])
 })
