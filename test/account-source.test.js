@@ -8,7 +8,13 @@ const {
   readBundledConfig, readClientToken, writeClientToken, registerClient, resolveConfig,
 } = require('../src/account-source')
 
-const BUNDLED = '/pkg/client-config.json'
+// 这些键必须用 path.join 拼:被测代码就是这么生成路径的,而 Windows 上分隔符是 \\。
+// 写死 '/u/xxx.json' 会让 fake fs 的键在 Windows 上永远匹配不上 —— 18 个测试就是
+// 这样在 CI 的 Windows runner 上集体变红的,而 macOS 上一直是绿的。
+const SERVER_CFG = path.join('/u', 'server-config.json')
+const CACHED = path.join('/u', 'cached-account.json')
+const TOKEN_FILE = path.join('/u', 'client-token.json')
+const BUNDLED = path.join('/pkg', 'client-config.json')
 const fakeOs = { hostname: () => 'test-mac' }
 // resolveConfig 的默认参数会去读真实的打包配置路径,测试必须把它指到假路径,
 // 否则开发机上恰好存在 client-config.json 就会把测试结果染成"看情况"。
@@ -43,27 +49,27 @@ test('readServerConfig returns null when file missing', () => {
 })
 
 test('readServerConfig returns null when fields empty', () => {
-  const fs = fakeFs({ '/u/server-config.json': JSON.stringify({ apiBase: '', token: '' }) })
+  const fs = fakeFs({ [SERVER_CFG]: JSON.stringify({ apiBase: '', token: '' }) })
   assert.equal(readServerConfig('/u', { fs }), null)
 })
 
 test('readServerConfig returns null when only apiBase is empty', () => {
-  const fs = fakeFs({ '/u/server-config.json': JSON.stringify({ apiBase: '', token: 't' }) })
+  const fs = fakeFs({ [SERVER_CFG]: JSON.stringify({ apiBase: '', token: 't' }) })
   assert.equal(readServerConfig('/u', { fs }), null)
 })
 
 test('readServerConfig returns null when only token is empty', () => {
-  const fs = fakeFs({ '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: '' }) })
+  const fs = fakeFs({ [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x', token: '' }) })
   assert.equal(readServerConfig('/u', { fs }), null)
 })
 
 test('readServerConfig returns null on malformed JSON', () => {
-  const fs = fakeFs({ '/u/server-config.json': '{not json' })
+  const fs = fakeFs({ [SERVER_CFG]: '{not json' })
   assert.equal(readServerConfig('/u', { fs }), null)
 })
 
 test('readServerConfig parses apiBase+token', () => {
-  const fs = fakeFs({ '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }) })
+  const fs = fakeFs({ [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x', token: 't' }) })
   assert.deepEqual(readServerConfig('/u', { fs }), { apiBase: 'https://x', token: 't' })
 })
 
@@ -73,12 +79,12 @@ test('serverConfigFile and cachedAccountFile join userDataDir with the expected 
 })
 
 test('readCachedAccount parses email+password directly', () => {
-  const fs = fakeFs({ '/u/cached-account.json': JSON.stringify({ email: 'c@x', password: 'cp' }) })
+  const fs = fakeFs({ [CACHED]: JSON.stringify({ email: 'c@x', password: 'cp' }) })
   assert.deepEqual(readCachedAccount('/u', { fs }), { email: 'c@x', password: 'cp' })
 })
 
 test('readCachedAccount returns null on malformed JSON', () => {
-  const fs = fakeFs({ '/u/cached-account.json': '{not json' })
+  const fs = fakeFs({ [CACHED]: '{not json' })
   assert.equal(readCachedAccount('/u', { fs }), null)
 })
 
@@ -226,18 +232,18 @@ test('releaseLease posts the lease_id on success and settles quietly', async () 
 })
 
 test('resolveRemoteAccount: lease success caches and returns lease', async () => {
-  const files = { '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }) }
+  const files = { [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x', token: 't' }) }
   const fs = fakeFs(files)
   const fetch = async () => jsonResponse(200, { email: 'a@x', password: 'p', lease_id: 5, expires_at: 9 })
   const out = await resolveRemoteAccount('/u', { fetch, fs })
   assert.equal(out.email, 'a@x')
   assert.equal(out.password, 'p')
   assert.deepEqual(out.lease, { apiBase: 'https://x', token: 't', leaseId: 5, expiresAt: 9 })
-  assert.ok(files['/u/cached-account.json'])                 // 已缓存
+  assert.ok(files[CACHED])                 // 已缓存
 })
 
 test('resolveRemoteAccount: cache write failure still returns the leased account', async () => {
-  const files = { '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }) }
+  const files = { [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x', token: 't' }) }
   const fs = fakeFsWriteThrows(files)
   const fetch = async () => jsonResponse(200, { email: 'a@x', password: 'p', lease_id: 5, expires_at: 9 })
   const out = await resolveRemoteAccount('/u', { fetch, fs })
@@ -248,8 +254,8 @@ test('resolveRemoteAccount: cache write failure still returns the leased account
 
 test('resolveRemoteAccount: server down falls back to cache with null lease', async () => {
   const files = {
-    '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }),
-    '/u/cached-account.json': JSON.stringify({ email: 'c@x', password: 'cp' }),
+    [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x', token: 't' }),
+    [CACHED]: JSON.stringify({ email: 'c@x', password: 'cp' }),
   }
   const fs = fakeFs(files)
   const fetch = async () => { throw new Error('down') }
@@ -267,14 +273,14 @@ test('resolveRemoteAccount: no config returns null', async () => {
 test('resolveRemoteAccount: a 200 lease with no email falls back to cache and leaves it intact', async () => {
   const good = JSON.stringify({ email: 'c@x', password: 'cp' })
   const files = {
-    '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }),
-    '/u/cached-account.json': good,
+    [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x', token: 't' }),
+    [CACHED]: good,
   }
   const fs = fakeFs(files)
   const fetch = async () => jsonResponse(200, { lease_id: 1, expires_at: 9 })
   const out = await resolveRemoteAccount('/u', { fetch, fs })
   // 缓存断言放在最前:返回值断言先失败的话,这条就跑不到,负向对照里等于没验。
-  assert.equal(files['/u/cached-account.json'], good)   // 缓存未被污染
+  assert.equal(files[CACHED], good)   // 缓存未被污染
   assert.equal(out.email, 'c@x')
   assert.equal(out.lease, null)
 })
@@ -282,44 +288,44 @@ test('resolveRemoteAccount: a 200 lease with no email falls back to cache and le
 test('resolveRemoteAccount: a 200 lease with no password leaves the cache intact', async () => {
   const good = JSON.stringify({ email: 'c@x', password: 'cp' })
   const files = {
-    '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }),
-    '/u/cached-account.json': good,
+    [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x', token: 't' }),
+    [CACHED]: good,
   }
   const fs = fakeFs(files)
   const fetch = async () => jsonResponse(200, { email: 'a@x', lease_id: 1 })
   const out = await resolveRemoteAccount('/u', { fetch, fs })
-  assert.equal(files['/u/cached-account.json'], good)
+  assert.equal(files[CACHED], good)
   assert.equal(out.email, 'c@x')
 })
 
 test('resolveRemoteAccount: a malformed 200 with no cache returns null and writes nothing', async () => {
-  const files = { '/u/server-config.json': JSON.stringify({ apiBase: 'https://x', token: 't' }) }
+  const files = { [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x', token: 't' }) }
   const fs = fakeFs(files)
   const fetch = async () => jsonResponse(200, {})
   const out = await resolveRemoteAccount('/u', { fetch, fs })
-  assert.equal('/u/cached-account.json' in files, false)
+  assert.equal(CACHED in files, false)
   assert.equal(out, null)
 })
 
 // apiBase 手写成 `https://x/` 是极可能的:拼出 `//api/lease` 会被 Hono 判 404,
 // 客户端读成"服务器不可用",于是永远走缓存/桌面文件 —— 功能形同没配。
 test('readServerConfig strips a trailing slash from apiBase', () => {
-  const fs = fakeFs({ '/u/server-config.json': JSON.stringify({ apiBase: 'https://x.workers.dev/', token: 't' }) })
+  const fs = fakeFs({ [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x.workers.dev/', token: 't' }) })
   assert.deepEqual(readServerConfig('/u', { fs }), { apiBase: 'https://x.workers.dev', token: 't' })
 })
 
 test('readServerConfig strips several trailing slashes', () => {
-  const fs = fakeFs({ '/u/server-config.json': JSON.stringify({ apiBase: 'https://x.workers.dev///', token: 't' }) })
+  const fs = fakeFs({ [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x.workers.dev///', token: 't' }) })
   assert.equal(readServerConfig('/u', { fs }).apiBase, 'https://x.workers.dev')
 })
 
 test('readServerConfig returns null when apiBase is nothing but slashes', () => {
-  const fs = fakeFs({ '/u/server-config.json': JSON.stringify({ apiBase: '/', token: 't' }) })
+  const fs = fakeFs({ [SERVER_CFG]: JSON.stringify({ apiBase: '/', token: 't' }) })
   assert.equal(readServerConfig('/u', { fs }), null)
 })
 
 test('a trailing-slash apiBase still produces exactly one slash in the request URL', async () => {
-  const files = { '/u/server-config.json': JSON.stringify({ apiBase: 'https://x.workers.dev/', token: 't' }) }
+  const files = { [SERVER_CFG]: JSON.stringify({ apiBase: 'https://x.workers.dev/', token: 't' }) }
   const fs = fakeFs(files)
   let seenUrl
   const fetch = async (url) => { seenUrl = url; return jsonResponse(200, { email: 'a@x', password: 'p', lease_id: 1, expires_at: 9 }) }
@@ -336,16 +342,16 @@ test('writeCachedAccount writes the credential cache as 0600', () => {
   writeCachedAccount('/u', { email: 'a@x', password: 'p' }, { fs: fakeFs(files, writes) })
   assert.equal(writes.length, 1)
   assert.equal(writes[0].opts && writes[0].opts.mode, 0o600)
-  assert.deepEqual(JSON.parse(files['/u/cached-account.json']), { email: 'a@x', password: 'p' })
+  assert.deepEqual(JSON.parse(files[CACHED]), { email: 'a@x', password: 'p' })
 })
 
 // writeFileSync 的 mode 只在它新建文件时生效,所以老版本留下的 0644 缓存
 // 每次覆写后仍是 0644。必须显式收紧。
 test('writeCachedAccount tightens an already-existing cache file', () => {
-  const files = { '/u/cached-account.json': JSON.stringify({ email: 'old@x', password: 'old' }) }
+  const files = { [CACHED]: JSON.stringify({ email: 'old@x', password: 'old' }) }
   const chmods = []
   writeCachedAccount('/u', { email: 'a@x', password: 'p' }, { fs: fakeFs(files, [], chmods) })
-  assert.deepEqual(chmods, [{ p: '/u/cached-account.json', mode: 0o600 }])
+  assert.deepEqual(chmods, [{ p: CACHED, mode: 0o600 }])
 })
 
 // chmod 失败不该让已经写成功的缓存变成"写失败"。
@@ -354,7 +360,7 @@ test('writeCachedAccount keeps the cache when chmod fails', () => {
   const fs = fakeFs(files)
   fs.chmodSync = () => { throw new Error('EPERM') }
   assert.doesNotThrow(() => writeCachedAccount('/u', { email: 'a@x', password: 'p' }, { fs }))
-  assert.deepEqual(JSON.parse(files['/u/cached-account.json']), { email: 'a@x', password: 'p' })
+  assert.deepEqual(JSON.parse(files[CACHED]), { email: 'a@x', password: 'p' })
 })
 
 test('writeCachedAccount still swallows a write failure', () => {
@@ -373,7 +379,7 @@ test('resolveRemoteAccount makes zero network calls when there is no server-conf
 test('resolveRemoteAccount makes zero network calls when server-config.json is malformed', async () => {
   let calls = 0
   const fetch = async () => { calls++; return jsonResponse(200, {}) }
-  await resolveRemoteAccount('/u', { fetch, fs: fakeFs({ '/u/server-config.json': '{not json' }) })
+  await resolveRemoteAccount('/u', { fetch, fs: fakeFs({ [SERVER_CFG]: '{not json' }) })
   assert.equal(calls, 0)
 })
 
@@ -395,7 +401,7 @@ test('writeClientToken 用 0600 并补 chmod', () => {
   const fs = fakeFs(files, writes, chmods)
   assert.equal(writeClientToken('/u', 'tok', { fs }), true)
   assert.equal(writes[0].opts.mode, 0o600)
-  assert.deepEqual(chmods, [{ p: '/u/client-token.json', mode: 0o600 }])
+  assert.deepEqual(chmods, [{ p: TOKEN_FILE, mode: 0o600 }])
   assert.equal(readClientToken('/u', { fs }), 'tok')
 })
 
@@ -406,7 +412,7 @@ test('writeClientToken 写失败返回 false 而不抛', () => {
 
 test('readClientToken 忽略空的或非字符串的 token', () => {
   for (const v of [{ token: '' }, { token: 123 }, {}]) {
-    const fs = fakeFs({ '/u/client-token.json': JSON.stringify(v) })
+    const fs = fakeFs({ [TOKEN_FILE]: JSON.stringify(v) })
     assert.equal(readClientToken('/u', { fs }), null)
   }
 })
@@ -426,13 +432,13 @@ test('首次启动:没有 token 就注册一个并落盘', async () => {
   assert.equal(calls[0].url, 'https://s.dev/api/register')
   assert.deepEqual(calls[0].body, { code: 'code1', device: 'test-mac' })
   assert.equal(readClientToken('/u', { fs }), 'fresh-token')
-  assert.equal(writes.find((w) => w.p === '/u/client-token.json').opts.mode, 0o600)
+  assert.equal(writes.find((w) => w.p === TOKEN_FILE).opts.mode, 0o600)
 })
 
 test('第二次启动:已有 token 就不再注册', async () => {
   const files = {
     [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'code1' }),
-    '/u/client-token.json': JSON.stringify({ token: 'stored' }),
+    [TOKEN_FILE]: JSON.stringify({ token: 'stored' }),
   }
   let called = 0
   const fetch = async () => { called++; return jsonResponse(200, { token: 'should-not-happen' }) }
@@ -443,7 +449,7 @@ test('第二次启动:已有 token 就不再注册', async () => {
 
 test('手写的 server-config.json 优先于内置配置,且不触发注册', async () => {
   const files = {
-    '/u/server-config.json': JSON.stringify({ apiBase: 'https://manual.dev/', token: 'manual-tok' }),
+    [SERVER_CFG]: JSON.stringify({ apiBase: 'https://manual.dev/', token: 'manual-tok' }),
     [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'code1' }),
   }
   let called = 0
@@ -489,7 +495,7 @@ test('租号被 401 拒绝时绝不重新注册', async () => {
   // 而不是自己去领一个新 token 把停用绕过去。
   const files = {
     [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'c' }),
-    '/u/client-token.json': JSON.stringify({ token: 'revoked' }),
+    [TOKEN_FILE]: JSON.stringify({ token: 'revoked' }),
   }
   const fs = fakeFs(files)
   const hits = []
