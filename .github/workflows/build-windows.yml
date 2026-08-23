@@ -40,9 +40,10 @@ jobs:
         shell: bash
         run: node --test test/*.test.js
 
-      # 服务器地址不是秘密(它靠 token 保护),邀请码是,所以只有后者走 secret。
-      # 仓库是公开的,这个包会发到公开 Release —— 邀请码事实上随包公开。防线在
-      # 服务端:自助注册出来的客户端默认停用,要在后台批准才能租号。
+      # 服务器地址不是秘密(它靠 token 保护),邀请码按 secret 处理。但要清楚:仓库
+      # 公开、产物发公开 Release,邀请码事实上随包公开,而自助注册出来的客户端是
+      # 默认启用的 —— 也就是没有准入,只有事后在后台停用。这是明确的取舍,换来
+      # "装上打开就能用"。真出事就删掉 Cloudflare 上的 REGISTER_CODE 整体关闭注册。
       - name: Inject the client config
         shell: bash
         env:
