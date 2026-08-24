@@ -266,3 +266,104 @@ test('后台停用之后,同一个 token 立刻失效', async () => {
     { method: 'POST', headers: { Authorization: 'Bearer ' + token } }, regEnv)
   assert.equal(lease.status, 401, '停用必须立刻生效 —— 这是现在唯一的管控手段')
 })
+
+// ---- /api/logs ----
+// 打包后的 GUI 应用没有可看的控制台。这条接口是唯一的观测口,所以它必须在
+// "客户端还没注册成功"时也能收 —— 那正是最需要日志的时刻。
+function logDbFactory(state) {
+  return () => ({
+    async verifyClient(hash) { return hash === state.tokenHash ? { id: 42 } : null },
+    async appendClientLogs(args) { (state.appended ||= []).push(args) },
+    async pruneClientLogs(keep) { state.pruned = keep },
+  })
+}
+async function buildLogApp(state) {
+  const app = new Hono()
+  registerApiRoutes(app, { makeDb: logDbFactory(state) })
+  return app
+}
+const logEnv = { DB: {}, ACCOUNT_ENC_KEY: KEY, REGISTER_CODE: 'invite-1' }
+
+test('POST /api/logs 带有效 token → 记在那个 client 名下', async () => {
+  const state = { tokenHash: await hashToken('good') }
+  const app = await buildLogApp(state)
+  const res = await app.request('/api/logs', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer good', 'content-type': 'application/json' },
+    body: JSON.stringify({ device: 'mac', lines: [{ level: 'error', message: 'boom' }] }),
+  }, logEnv)
+  assert.equal(res.status, 200)
+  assert.equal(state.appended.length, 1)
+  assert.equal(state.appended[0].clientId, 42)
+  assert.deepEqual(state.appended[0].lines, [{ level: 'error', message: 'boom' }])
+})
+
+test('POST /api/logs 无 token 但邀请码对 → 匿名收下,client_id 为 null', async () => {
+  const state = { tokenHash: await hashToken('good') }
+  const app = await buildLogApp(state)
+  const res = await app.request('/api/logs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: 'invite-1', device: 'win-box', lines: [{ level: 'log', message: 'hi' }] }),
+  }, logEnv)
+  assert.equal(res.status, 200)
+  assert.equal(state.appended[0].clientId, null)
+  assert.equal(state.appended[0].device, 'win-box')
+})
+
+test('POST /api/logs 既没 token 也没对的邀请码 → 401,一条都不写', async () => {
+  const state = { tokenHash: await hashToken('good') }
+  const app = await buildLogApp(state)
+  const res = await app.request('/api/logs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: 'wrong', lines: [{ level: 'log', message: 'hi' }] }),
+  }, logEnv)
+  assert.equal(res.status, 401)
+  assert.equal(state.appended, undefined)
+})
+
+// 停用一台机器之后它还能往日志表里写,吊销就漏了一半。停用的 token 必须退回匿名
+// 路径 —— 没有邀请码就一条都不收。
+test('POST /api/logs 停用客户端的 token 不再算认证通过', async () => {
+  const state = { tokenHash: 'nobody-matches-this' }
+  const app = await buildLogApp(state)
+  const res = await app.request('/api/logs', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer disabled-token', 'content-type': 'application/json' },
+    body: JSON.stringify({ lines: [{ level: 'log', message: 'hi' }] }),
+  }, logEnv)
+  assert.equal(res.status, 401)
+  assert.equal(state.appended, undefined)
+})
+
+test('POST /api/logs 砍掉超量的条数、过长的正文和乱来的 level', async () => {
+  const state = { tokenHash: await hashToken('good') }
+  const app = await buildLogApp(state)
+  const lines = Array.from({ length: 200 }, (_, i) => ({ level: 'log', message: `第${i}条` }))
+  lines.push({ level: '<script>', message: 'x'.repeat(5000) })
+  const res = await app.request('/api/logs', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer good', 'content-type': 'application/json' },
+    body: JSON.stringify({ device: 'd'.repeat(300), lines }),
+  }, logEnv)
+  assert.equal(res.status, 200)
+  const got = state.appended[0]
+  assert.ok(got.lines.length <= 50, `条数应被砍到 50 以内,实际 ${got.lines.length}`)
+  assert.ok(got.lines.every((l) => l.message.length <= 500), '每条正文不超过 500 字')
+  assert.ok(got.lines.every((l) => ['log', 'warn', 'error'].includes(l.level)), 'level 只认三种')
+  assert.ok(got.device.length <= 60, 'device 也要设上限')
+  assert.ok(state.pruned > 0, '写完要修一次保留上限')
+})
+
+test('POST /api/logs 空 lines 直接 200,不碰 db', async () => {
+  const state = { tokenHash: await hashToken('good') }
+  const app = await buildLogApp(state)
+  const res = await app.request('/api/logs', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer good', 'content-type': 'application/json' },
+    body: JSON.stringify({ lines: [] }),
+  }, logEnv)
+  assert.equal(res.status, 200)
+  assert.equal(state.appended, undefined)
+})

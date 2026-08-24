@@ -221,3 +221,51 @@ test('deleteAccount 拒绝删掉正被持有的账号', async () => {
   assert.equal(await db.deleteAccount(acc, now), false)
   assert.equal((await db.listAccounts()).length, 1, '账号还在')
 })
+
+test('appendClientLogs 写入并按最新在前读出,匿名记录 client_id 为 null', async () => {
+  const db = makeDb(d1)
+  const cid = await seedClient('mac', 'h-log')
+  await db.appendClientLogs({
+    clientId: cid, device: 'mac',
+    lines: [{ level: 'log', message: '第一条' }, { level: 'error', message: '第二条' }],
+    now: 1000,
+  })
+  await db.appendClientLogs({
+    clientId: null, device: 'win-box',
+    lines: [{ level: 'error', message: '注册前的匿名一条' }],
+    now: 2000,
+  })
+
+  const all = await db.listClientLogs({ limit: 10 })
+  assert.equal(all.length, 3)
+  assert.equal(all[0].message, '注册前的匿名一条', '最新的在最前')
+  assert.equal(all[0].client_id, null)
+  assert.equal(all[0].device, 'win-box')
+  assert.equal(all[0].ts, 2000)
+
+  const mine = await db.listClientLogs({ clientId: cid, limit: 10 })
+  assert.equal(mine.length, 2)
+  assert.deepEqual(mine.map((r) => r.message), ['第二条', '第一条'])
+  assert.equal(mine[0].level, 'error')
+})
+
+// 匿名通道是公开可写的(邀请码随公开 Release 分发),所以库里必须有个天花板,
+// 否则一个循环脚本就能把 D1 撑爆。
+test('pruneClientLogs 只留最新的若干条', async () => {
+  const db = makeDb(d1)
+  await db.appendClientLogs({
+    clientId: null, device: 'd',
+    lines: Array.from({ length: 10 }, (_, i) => ({ level: 'log', message: `第${i}条` })),
+    now: 5,
+  })
+  await db.pruneClientLogs(4)
+  const left = await db.listClientLogs({ limit: 50 })
+  assert.equal(left.length, 4)
+  assert.deepEqual(left.map((r) => r.message), ['第9条', '第8条', '第7条', '第6条'])
+})
+
+test('appendClientLogs 收到空数组时什么也不做,不炸', async () => {
+  const db = makeDb(d1)
+  await db.appendClientLogs({ clientId: null, device: 'd', lines: [], now: 1 })
+  assert.equal((await db.listClientLogs({ limit: 5 })).length, 0)
+})

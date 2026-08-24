@@ -292,3 +292,64 @@ test('POST /admin/accounts/:id/delete 删一个已经不存在的账号不报错
   assert.equal(res.status, 302)
   assert.deepEqual(state.calls.deleteAccount, [])
 })
+
+// ---- /admin/logs ----
+// 日志正文由客户端上报,而匿名通道是公开可写的 —— 谁拿到安装包都能往里灌任意字符串。
+// 这是一个现成的存储型 XSS 入口,转义在这里不是"顺手加的",是这个页面存在的前提。
+function withLogs(state, rows) {
+  state.db.listClientLogs = async ({ clientId = null, limit = 200 } = {}) => {
+    state.logQuery = { clientId, limit }
+    return clientId == null ? rows : rows.filter((r) => r.client_id === clientId)
+  }
+}
+
+test('GET /admin/logs 列出日志,并转义客户端送上来的正文', async () => {
+  const { app, state } = buildApp()
+  withLogs(state, [
+    { id: 2, client_id: null, device: '<img src=x onerror=alert(1)>', ts: 1700000000000, level: 'error', message: '<script>alert(2)</script>' },
+    { id: 1, client_id: 4, device: 'mac', ts: 1700000000000, level: 'log', message: '正常一条' },
+  ])
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const cookie = await login(app, e)
+  const res = await app.request('/admin/logs', { headers: { cookie } }, e)
+  assert.equal(res.status, 200)
+  const html = await res.text()
+  assert.ok(!html.includes('<script>alert(2)</script>'), '正文里的裸标签绝不能出现')
+  assert.ok(!html.includes('<img src=x onerror=alert(1)>'), 'device 也是客户端送的')
+  assert.match(html, /&lt;script&gt;alert\(2\)&lt;\/script&gt;/)
+  assert.match(html, /正常一条/)
+  assert.match(html, /匿名/, '没有 client_id 的记录要标出来 —— 那是注册前的上报')
+})
+
+test('GET /admin/logs?client=4 只看那台机器', async () => {
+  const { app, state } = buildApp()
+  withLogs(state, [
+    { id: 2, client_id: null, device: 'win', ts: 1, level: 'log', message: '匿名的' },
+    { id: 1, client_id: 4, device: 'mac', ts: 1, level: 'log', message: '四号的' },
+  ])
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const cookie = await login(app, e)
+  const html = await (await app.request('/admin/logs?client=4', { headers: { cookie } }, e)).text()
+  assert.equal(state.logQuery.clientId, 4)
+  assert.match(html, /四号的/)
+  assert.ok(!html.includes('匿名的'))
+})
+
+test('GET /admin/logs 未认证时重定向到登录页,且不碰 db', async () => {
+  const { app, state } = buildApp()
+  let touched = false
+  state.db.listClientLogs = async () => { touched = true; return [] }
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const res = await app.request('/admin/logs', {}, e)
+  assert.equal(res.status, 302)
+  assert.equal(touched, false)
+})
+
+test('GET /admin 的客户端表给出通往日志的入口', async () => {
+  const { app, state } = buildApp()
+  state.clients.push({ id: 4, name: 'mac', enabled: 1, last_seen_at: 1, last_account_id: null })
+  const e = { ...env, ADMIN_PASSWORD_HASH: ADMIN_HASH }
+  const cookie = await login(app, e)
+  const html = await (await app.request('/admin', { headers: { cookie } }, e)).text()
+  assert.match(html, /\/admin\/logs\?client=4/, '每台机器要能一键看它自己的日志')
+})

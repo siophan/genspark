@@ -6,6 +6,7 @@ const {
   readServerConfig, readCachedAccount, writeCachedAccount,
   requestLease, renewLease, renewTrackedLeases, releaseLease, resolveRemoteAccount,
   readBundledConfig, readClientToken, writeClientToken, registerClient, resolveConfig,
+  logTarget, sendLogs,
 } = require('../src/account-source')
 
 // 这些键必须用 path.join 拼:被测代码就是这么生成路径的,而 Windows 上分隔符是 \\。
@@ -532,4 +533,72 @@ test('端到端:零配置启动应当注册 → 租号 → 缓存账号', async 
   assert.equal(got.email, 'a@x.com')
   assert.deepEqual(got.lease, { apiBase: 'https://s.dev', token: 'tok-1', leaseId: 7, expiresAt: 123 })
   assert.deepEqual(readCachedAccount('/u', { fs }), { email: 'a@x.com', password: 'pw' })
+})
+
+// ---- 日志上报 ----
+// logTarget 只读。上报日志这种副作用绝不该顺手注册出一个新客户端来 ——
+// 那会让"停用一台机器"变成打地鼠。
+test('logTarget 从不注册,拿不到任何配置时返回 null', async () => {
+  const fs = fakeFs({})
+  let fetched = 0
+  const t = await logTarget('/u', cfgOpts(fs, async () => { fetched++; return jsonResponse(200, {}) }))
+  assert.equal(t, null)
+  assert.equal(fetched, 0, '一个请求都不该发')
+})
+
+test('logTarget 用内置配置的 apiBase 和邀请码,没 token 也能上报', async () => {
+  const fs = fakeFs({ [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev/', registerCode: 'inv' }) })
+  const t = await logTarget('/u', cfgOpts(fs, async () => jsonResponse(200, {})))
+  assert.equal(t.apiBase, 'https://s.dev', '尾部斜杠要规范掉')
+  assert.equal(t.token, null)
+  assert.equal(t.registerCode, 'inv')
+  assert.equal(t.device, 'test-mac')
+})
+
+test('logTarget 有 token 时带上 token', async () => {
+  const fs = fakeFs({
+    [BUNDLED]: JSON.stringify({ apiBase: 'https://s.dev', registerCode: 'inv' }),
+    [TOKEN_FILE]: JSON.stringify({ token: 'tok-1' }),
+  })
+  const t = await logTarget('/u', cfgOpts(fs, async () => jsonResponse(200, {})))
+  assert.equal(t.token, 'tok-1')
+})
+
+// token 和邀请码一起发:客户端被停用之后 token 验不过,服务端会退回匿名路径收下。
+// 一台机器刚被停用时的日志恰恰是最该看到的,不能因为吊销而失明。
+test('sendLogs 同时带上 token 和邀请码', async () => {
+  let seen = null
+  const fetch = async (url, init) => {
+    seen = { url, headers: init.headers, body: JSON.parse(init.body) }
+    return jsonResponse(200, { ok: true })
+  }
+  const ok = await sendLogs(
+    { apiBase: 'https://s.dev', token: 'tok-1', registerCode: 'inv', device: 'mac' },
+    [{ level: 'log', message: 'hi' }],
+    { fetch },
+  )
+  assert.equal(ok, true)
+  assert.equal(seen.url, 'https://s.dev/api/logs')
+  assert.equal(seen.headers.Authorization, 'Bearer tok-1')
+  assert.equal(seen.body.code, 'inv')
+  assert.equal(seen.body.device, 'mac')
+  assert.deepEqual(seen.body.lines, [{ level: 'log', message: 'hi' }])
+})
+
+test('sendLogs 没有 target 或没有行时不发请求', async () => {
+  let calls = 0
+  const fetch = async () => { calls++; return jsonResponse(200, {}) }
+  assert.equal(await sendLogs(null, [{ level: 'log', message: 'x' }], { fetch }), false)
+  assert.equal(await sendLogs({ apiBase: 'https://s.dev', device: 'd' }, [], { fetch }), false)
+  assert.equal(calls, 0)
+})
+
+test('sendLogs 在服务器拒绝时返回 false,让调用方留着重试', async () => {
+  const fetch = async () => jsonResponse(401, {})
+  const ok = await sendLogs(
+    { apiBase: 'https://s.dev', token: null, registerCode: 'bad', device: 'd' },
+    [{ level: 'log', message: 'x' }],
+    { fetch },
+  )
+  assert.equal(ok, false)
 })

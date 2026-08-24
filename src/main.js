@@ -29,7 +29,25 @@ const {
 } = require('./accounts')
 const { buildLoginScript } = require('./auto-login')
 const { serveAccount, registerLoginScript, clearLoginScript } = require('./account-bridge')
-const { resolveRemoteAccount, renewTrackedLeases, releaseLease } = require('./account-source')
+const {
+  resolveRemoteAccount, renewTrackedLeases, releaseLease, logTarget, sendLogs,
+} = require('./account-source')
+const { createLogBuffer } = require('./log-ship')
+
+// 装在最靠前的地方:取号发生在启动的头几百毫秒里,晚装一步就少一步日志。
+// 打包后的应用没有可看的控制台,这个缓冲是那段过程唯一的观测口。
+const logBuffer = createLogBuffer()
+logBuffer.install()
+
+// 把攒下的日志送到服务器,后台按机器分开显示。永不抛 —— 一个排障设施把宿主程序
+// 搞崩是不可接受的。送不出去时行会留在缓冲里,下一次再试。
+async function shipLogs() {
+  try {
+    const target = logTarget(app.getPath('userData'))
+    if (!target) return
+    await logBuffer.flush((lines) => sendLogs(target, lines))
+  } catch {}
+}
 
 const PRELOAD = path.join(__dirname, 'preload.js')
 
@@ -132,6 +150,7 @@ function trackLease(lease) {
     // later. It never rejects, so the finally is only bookkeeping.
     try {
       await renewTrackedLeases(activeLeases)
+      await shipLogs()
     } finally {
       renewing = false
     }
@@ -245,6 +264,7 @@ app.whenReady().then(async () => {
   serveAccount()
   buildMenu({ onOpenScriptsDir: () => shell.openPath(dir) })
   await openWindow(dir)
+  await shipLogs()
 }).catch((err) => {
   // Nothing above is allowed to end as an unhandled rejection: it would be
   // silent, and the user would be left staring at an app that never opened.
@@ -255,10 +275,13 @@ app.whenReady().then(async () => {
 // It is best-effort: a failure or a slow network must not keep the app alive,
 // so the wait is capped and an unreleased lease is left to expire on its own.
 app.on('before-quit', (event) => {
-  if (!activeLeases.size) return
+  // 也要等日志送完。原先这里只在"有租约"时才拦一下退出,可取号失败的那次运行
+  // 恰恰没有租约 —— 日志会跟着进程一起蒸发,最需要它的时候它不在。
+  if (!activeLeases.size && !logBuffer.size()) return
   event.preventDefault()
   const cap = new Promise((resolve) => setTimeout(resolve, RELEASE_TIMEOUT_MS))
-  Promise.race([releaseAllLeases(), cap]).finally(() => app.exit(0)).catch(() => {})
+  Promise.race([Promise.all([releaseAllLeases(), shipLogs()]), cap])
+    .finally(() => app.exit(0)).catch(() => {})
 })
 
 app.on('window-all-closed', () => {

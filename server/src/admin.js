@@ -100,15 +100,38 @@ export function registerAdminRoutes(app, { makeDb = realMakeDb } = {}) {
       `<td>${cl.enabled ? '✓' : '✗ 已停用'}</td>` +
       `<td>${heldAccountCell(cl, now)}</td>` +
       `<td>${esc(stamp(cl.last_seen_at))}</td><td>` +
-      `<form class=inline method=post action=/admin/clients/${cl.id}/toggle><button>开关</button></form></td></tr>`).join('')
+      `<form class=inline method=post action=/admin/clients/${cl.id}/toggle><button>开关</button></form> ` +
+      `<a href="/admin/logs?client=${cl.id}">日志</a></td></tr>`).join('')
     return c.html(page('后台',
       '<h1>账号</h1>' +
       '<form method=post action=/admin/accounts><input name=email placeholder=email>' +
       '<input name=password placeholder=密码><input name=note placeholder=备注><button>新增</button></form>' +
       `<table><tr><th>id<th>email<th>启用<th>租给<th>操作</tr>${arows}</table>` +
-      '<h1>客户端</h1>' +
+      '<h1>客户端</h1><p><a href=/admin/logs>看全部启动日志</a></p>' +
       '<form method=post action=/admin/clients><input name=name placeholder=名称><button>生成 token</button></form>' +
       `<table><tr><th>id<th>名称<th>状态<th>账号<th>最后活动<th>操作</tr>${crows}</table>`))
+  })
+
+  // 启动日志。正文和 device 都是客户端上报的,而匿名上报那条通道是公开可写的 ——
+  // 页面上每一个来自客户端的字节都必须过 esc(),这是这个页面的前提而不是顺手加的。
+  app.get('/admin/logs', async (c) => {
+    const db = makeDb(c.env.DB)
+    const raw = c.req.query('client')
+    const clientId = raw != null && /^\d+$/.test(raw) ? Number(raw) : null
+    const rows = await db.listClientLogs({ clientId, limit: 300 })
+    const body = rows.map((r) =>
+      `<tr><td><small>${esc(stamp(r.ts))}</small></td>` +
+      `<td>${r.client_id == null ? '<b>匿名</b>' : '#' + r.client_id}</td>` +
+      `<td><small>${esc(r.device || '')}</small></td>` +
+      `<td>${esc(r.level)}</td><td><code>${esc(r.message)}</code></td></tr>`).join('')
+    return c.html(page('启动日志',
+      `<h1>启动日志${clientId == null ? '' : ' · 客户端 #' + clientId}</h1>` +
+      '<p><a href=/admin>返回后台</a>' +
+      (clientId == null ? '' : ' · <a href=/admin/logs>看全部</a>') + '</p>' +
+      // 空表和"这台机器从没上报过"是同一件事,但读页面的人需要被明确告知,
+      // 否则会以为是页面坏了。而且这里的空白本身就是一条线索:客户端可能连不上。
+      (rows.length ? `<table><tr><th>时间<th>客户端<th>device<th>级别<th>内容</tr>${body}</table>`
+        : '<p>没有任何上报。客户端连不上服务器时也是这个样子 —— 空白本身不能证明它启动正常。</p>')))
   })
 
   app.post('/admin/accounts', async (c) => {

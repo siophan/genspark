@@ -167,6 +167,41 @@ export function makeDb(d1) {
         .first()
       return row.id
     },
+    // 一条多行 INSERT 而不是循环 prepare:D1 每条语句都是一次往返,启动日志一次就是
+    // 十几行。空数组直接返回 —— 拼出来会是语法错误的 `VALUES` 空尾巴。
+    async appendClientLogs({ clientId = null, device = null, lines, now }) {
+      if (!lines || !lines.length) return
+      const tuples = lines.map(() => '(?,?,?,?,?)').join(',')
+      const vals = []
+      for (const l of lines) vals.push(clientId, device, now, l.level, l.message)
+      await d1
+        .prepare(`INSERT INTO client_logs (client_id, device, ts, level, message) VALUES ${tuples}`)
+        .bind(...vals)
+        .run()
+    },
+
+    // 最新在前。clientId 为 null 表示不过滤 —— 注意这和"只看匿名记录"不是一回事,
+    // 后台需要的是整条时间线,而匿名记录恰恰是最该被看到的那些。
+    async listClientLogs({ clientId = null, limit = 200 } = {}) {
+      const q = clientId == null
+        ? d1.prepare('SELECT * FROM client_logs ORDER BY id DESC LIMIT ?1').bind(limit)
+        : d1.prepare('SELECT * FROM client_logs WHERE client_id = ?1 ORDER BY id DESC LIMIT ?2').bind(clientId, limit)
+      const { results } = await q.all()
+      return results || []
+    },
+
+    // 匿名上报那条通道是公开可写的(邀请码随公开 Release 分发),库里必须有天花板,
+    // 否则一个循环脚本就能把 D1 撑满。每次写入后顺手修一次。
+    async pruneClientLogs(keep) {
+      await d1
+        .prepare(
+          `DELETE FROM client_logs
+             WHERE id <= (SELECT id FROM client_logs ORDER BY id DESC LIMIT 1 OFFSET ?1)`,
+        )
+        .bind(keep)
+        .run()
+    },
+
     async setClientEnabled(id, enabled) {
       await d1.prepare('UPDATE clients SET enabled = ?2 WHERE id = ?1').bind(id, enabled ? 1 : 0).run()
     },

@@ -14,6 +14,9 @@ export function registerApiRoutes(app, { makeDb = realMakeDb } = {}) {
   app.use('/api/*', async (c, next) => {
     // 注册是客户端拿到 token 之前唯一能走的路,它自己用邀请码把门,不能要 bearer。
     if (c.req.path === '/api/register') return next()
+    // 日志也放行:客户端最需要上报的时刻恰恰是它还没注册成功、手上没有 token 的时候。
+    // 这条路由自己做认证 —— 有 token 就按 token 算,没有就要求邀请码。
+    if (c.req.path === '/api/logs') return next()
     const token = bearer(c)
     if (!token) return c.json({ error: 'unauthorized' }, 401)
     const db = makeDb(c.env.DB)
@@ -49,6 +52,50 @@ export function registerApiRoutes(app, { makeDb = realMakeDb } = {}) {
     const id = await db.createClient({ name: `auto:${device}`, token_hash: await hashToken(token) })
     // token 只在这里出现这一次,库里只留哈希。客户端存不下来就只能重新注册。
     return c.json({ token, client_id: id })
+  })
+
+  // 上限。匿名通道是公开可写的(邀请码随公开 Release 分发,事实上已公开),所以
+  // 每一个维度都得有天花板:单次条数、单条长度、device 长度、库里总量。
+  const LOG_MAX_LINES = 50
+  const LOG_MAX_MESSAGE = 500
+  const LOG_MAX_DEVICE = 60
+  const LOG_KEEP = 5000
+  const LOG_LEVELS = new Set(['log', 'warn', 'error'])
+
+  app.post('/api/logs', async (c) => {
+    const body = await c.req.json().catch(() => ({}))
+    const db = makeDb(c.env.DB)
+
+    // 认证:先看 token。停用的客户端在这里同样验不过(verifyClient 只认 enabled=1),
+    // 于是退回匿名路径 —— 没有邀请码就一条都不收,吊销不会在日志上漏一个口子。
+    let clientId = null
+    const token = bearer(c)
+    if (token) {
+      const client = await db.verifyClient(await hashToken(token), Date.now())
+      if (client) clientId = client.id
+    }
+    if (clientId == null) {
+      const expected = c.env.REGISTER_CODE
+      const supplied = typeof body.code === 'string' ? body.code : ''
+      // 和 /api/register 一样比哈希,不比原文:比原文会在第一个不同字节早退,
+      // 把"前缀对了几位"通过耗时泄露出去。
+      if (!expected || (await hashToken(supplied)) !== (await hashToken(expected))) {
+        return c.json({ error: 'unauthorized' }, 401)
+      }
+    }
+
+    const raw = Array.isArray(body.lines) ? body.lines : []
+    // 砍尾部而不是砍头:溢出时留下最早的那些行。故障的成因在开头,后面全是它的回声。
+    const lines = raw.slice(0, LOG_MAX_LINES).map((l) => ({
+      level: LOG_LEVELS.has(l && l.level) ? l.level : 'log',
+      message: String((l && l.message) ?? '').slice(0, LOG_MAX_MESSAGE),
+    }))
+    if (!lines.length) return c.json({ ok: true })
+
+    const device = (typeof body.device === 'string' ? body.device.trim() : '').slice(0, LOG_MAX_DEVICE) || null
+    await db.appendClientLogs({ clientId, device, lines, now: Date.now() })
+    await db.pruneClientLogs(LOG_KEEP)
+    return c.json({ ok: true })
   })
 
   app.post('/api/lease', async (c) => {

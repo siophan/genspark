@@ -157,29 +157,76 @@ async function registerClient({ apiBase, registerCode, device }, { fetch = globa
 async function resolveConfig(userDataDir, opts = {}) {
   const { fs = fsDefault, fetch = globalThis.fetch, os = osDefault, bundledFile = bundledConfigFile() } = opts
   const manual = readServerConfig(userDataDir, { fs })
-  if (manual) return manual
+  if (manual) {
+    console.log('[account-source] 用 server-config.json 里指定的服务器')
+    return manual
+  }
 
   const bundled = readBundledConfig({ fs, file: bundledFile })
-  if (!bundled) return null
+  if (!bundled) {
+    console.error('[account-source] 没有可用的内置配置(client-config.json 缺失或不完整),不会自动登录')
+    return null
+  }
 
   const existing = readClientToken(userDataDir, { fs })
-  if (existing) return { apiBase: bundled.apiBase, token: existing }
+  if (existing) {
+    console.log('[account-source] 复用本机已有的 client-token.json')
+    return { apiBase: bundled.apiBase, token: existing }
+  }
 
   // 只有在本地压根没有 token 时才走到这里。租号被 401 拒绝时绝不能触发注册 ——
   // 否则在后台停用一台机器,它下次启动自己再领一个新 token,吊销就形同虚设。
   let device = 'unknown'
   try { device = String(os.hostname() || 'unknown') } catch {}
+  console.log('[account-source] 本机还没有 token,向 ' + bundled.apiBase + ' 注册,device=' + device)
   const token = await registerClient({ ...bundled, device }, { fetch })
-  if (!token) return null
+  if (!token) {
+    console.error('[account-source] 注册没成功,这次不会自动登录')
+    return null
+  }
+  console.log('[account-source] 注册成功,token 已写入本机')
   writeClientToken(userDataDir, token, { fs })
   return { apiBase: bundled.apiBase, token }
+}
+
+// 日志上报的目标。刻意与 resolveConfig 分开而不是复用它:resolveConfig 在没有 token
+// 时会注册一个新客户端,而"上报一次日志"绝不该产生这种副作用 —— 否则在后台停用一台
+// 机器,它下次开机光是上报日志就又冒出一个新 client,吊销变成打地鼠。这里只读。
+function logTarget(userDataDir, opts = {}) {
+  const { fs = fsDefault, os = osDefault, bundledFile = bundledConfigFile() } = opts
+  const manual = readServerConfig(userDataDir, { fs })
+  const bundled = readBundledConfig({ fs, file: bundledFile })
+  const apiBase = (manual && manual.apiBase) || (bundled && bundled.apiBase)
+  if (!apiBase) return null
+  const token = (manual && manual.token) || readClientToken(userDataDir, { fs })
+  const registerCode = bundled ? bundled.registerCode : null
+  // 两样都没有就没法过服务端那道认证,发出去只会白挨一个 401。
+  if (!token && !registerCode) return null
+  let device = 'unknown'
+  try { device = String(os.hostname() || 'unknown') } catch {}
+  return { apiBase, token: token || null, registerCode: registerCode || null, device }
+}
+
+// token 和邀请码一起发。客户端被停用之后 token 验不过,服务端会退回匿名路径收下 ——
+// 一台机器刚被停用时的日志恰恰是最该看到的,不该因为吊销而失明。
+async function sendLogs(target, lines, { fetch = globalThis.fetch } = {}) {
+  if (!target || !target.apiBase || !lines || !lines.length) return false
+  const r = await post(target.apiBase, '/api/logs', target.token || '', {
+    code: target.registerCode || undefined,
+    device: target.device,
+    lines,
+  }, fetch)
+  return r.ok
 }
 
 // 远端优先;失败回落本地缓存(lease=null,表示无需续租);都没有返回 null。
 async function resolveRemoteAccount(userDataDir, opts = {}) {
   const { fetch = globalThis.fetch, fs = fsDefault } = opts
   const cfg = await resolveConfig(userDataDir, opts)
-  if (!cfg) return null
+  if (!cfg) {
+    console.error('[account-source] 没有服务器配置,跳过远端取号')
+    return null
+  }
   const leased = await requestLease(cfg, { fetch })
   // A 200 is not the same as a usable account: a half-deployed Worker, or an
   // apiBase typo'd onto some unrelated JSON endpoint, answers 200 with a body
@@ -187,6 +234,9 @@ async function resolveRemoteAccount(userDataDir, opts = {}) {
   // the caller, and above all it must not overwrite a good cached account with
   // {} and destroy the offline fallback for the next launch too.
   if (leased && leased.email && leased.password) {
+    // 只记 lease_id。这些日志会离开本机、显示在后台网页上,账号和密码绝不能进去 ——
+    // 后台自己能把 lease_id 对应到账号,不需要客户端替它说。
+    console.log('[account-source] 取号成功 lease_id=' + leased.lease_id)
     writeCachedAccount(userDataDir, { email: leased.email, password: leased.password }, { fs })
     return {
       email: leased.email,
@@ -195,7 +245,11 @@ async function resolveRemoteAccount(userDataDir, opts = {}) {
     }
   }
   const cached = readCachedAccount(userDataDir, { fs })
-  if (cached) return { email: cached.email, password: cached.password, lease: null }
+  if (cached) {
+    console.warn('[account-source] 远端取号没成功,回落到本机缓存的账号')
+    return { email: cached.email, password: cached.password, lease: null }
+  }
+  console.error('[account-source] 远端和本机缓存都没有可用账号')
   return null
 }
 
@@ -203,6 +257,7 @@ module.exports = {
   serverConfigFile, cachedAccountFile, clientTokenFile, bundledConfigFile,
   readServerConfig, readCachedAccount, writeCachedAccount,
   readBundledConfig, readClientToken, writeClientToken, registerClient, resolveConfig,
+  logTarget, sendLogs,
   requestLease, renewLease, renewTrackedLeases, releaseLease, resolveRemoteAccount,
   LEASE_RENEWED, LEASE_GONE, LEASE_RETRY,
 }

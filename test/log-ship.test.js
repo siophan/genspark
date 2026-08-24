@@ -1,0 +1,93 @@
+const { test } = require('node:test')
+const assert = require('node:assert/strict')
+const { createLogBuffer, formatArg } = require('../src/log-ship')
+
+function fakeConsole() {
+  const seen = []
+  return {
+    seen,
+    log: (...a) => seen.push(['log', a]),
+    warn: (...a) => seen.push(['warn', a]),
+    error: (...a) => seen.push(['error', a]),
+  }
+}
+
+test('拦下三个级别,但底层 console 的行为一个不少', () => {
+  const target = fakeConsole()
+  const buf = createLogBuffer({ target })
+  buf.install()
+  target.log('一')
+  target.warn('二')
+  target.error('三')
+  buf.restore()
+  target.log('拆掉之后的不该再进缓冲')
+
+  assert.deepEqual(target.seen.map((s) => s[0]), ['log', 'warn', 'error', 'log'], '原样透传')
+  assert.equal(buf.size(), 3)
+})
+
+test('多个参数拼成一行,Error 带上可读内容', () => {
+  const target = fakeConsole()
+  const buf = createLogBuffer({ target })
+  buf.install()
+  target.error('[x] 失败:', new Error('boom'))
+  buf.restore()
+  let taken
+  buf.flush(async (b) => { taken = b; return true })
+  assert.match(taken[0].message, /\[x\] 失败:/)
+  assert.match(taken[0].message, /boom/)
+  assert.equal(taken[0].level, 'error')
+})
+
+// 溢出时丢新的、留旧的:故障的成因在开头,后面全是它的回声。
+test('缓冲满了之后丢掉新行,保住最早的', () => {
+  const target = fakeConsole()
+  const buf = createLogBuffer({ target, max: 3 })
+  buf.install()
+  for (let i = 0; i < 10; i++) target.log('第' + i)
+  buf.restore()
+  let taken
+  buf.flush(async (b) => { taken = b; return true })
+  assert.equal(taken.length, 3)
+  assert.deepEqual(taken.map((l) => l.message), ['第0', '第1', '第2'])
+})
+
+// 上报本身也会 console.error(post() 失败时就会)。不挡住的话失败一次就自我循环:
+// 记一行 → 下次上报带上它 → 又失败 → 再记一行,永不收敛。
+test('上报期间产生的日志不进缓冲,避免自我循环', async () => {
+  const target = fakeConsole()
+  const buf = createLogBuffer({ target })
+  buf.install()
+  target.log('要送的那一行')
+  await buf.flush(async () => {
+    target.error('上报自己失败了')  // 这一行不能被记下来
+    return true
+  })
+  buf.restore()
+  assert.equal(buf.size(), 0, '送成功后缓冲清空,且上报期间那行没被记进来')
+})
+
+test('上报失败时把行放回去,下一轮还能重试', async () => {
+  const target = fakeConsole()
+  const buf = createLogBuffer({ target })
+  buf.install()
+  target.log('一')
+  const ok = await buf.flush(async () => false)
+  buf.restore()
+  assert.equal(ok, false)
+  assert.equal(buf.size(), 1, '没送出去就得留着')
+})
+
+test('缓冲为空时不调用发送函数', async () => {
+  const buf = createLogBuffer({ target: fakeConsole() })
+  let called = false
+  const ok = await buf.flush(async () => { called = true; return true })
+  assert.equal(called, false)
+  assert.equal(ok, false)
+})
+
+test('formatArg 不会因为循环引用而抛', () => {
+  const a = {}
+  a.self = a
+  assert.equal(typeof formatArg(a), 'string')
+})
