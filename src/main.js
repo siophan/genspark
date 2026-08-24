@@ -33,6 +33,7 @@ const {
   resolveRemoteAccount, renewTrackedLeases, releaseLease, logTarget, sendLogs,
 } = require('./account-source')
 const { createLogBuffer } = require('./log-ship')
+const { userDataDir, migrateLegacyUserData } = require('./user-data')
 
 // 装在最靠前的地方:取号发生在启动的头几百毫秒里,晚装一步就少一步日志。
 // 打包后的应用没有可看的控制台,这个缓冲是那段过程唯一的观测口。
@@ -54,10 +55,16 @@ const PRELOAD = path.join(__dirname, 'preload.js')
 // The menu bar, Dock, ⌘Tab switcher, and About panel all show the app's name,
 // so it carries the brand too — rename it to 老猫 like everything else.
 app.setName(DISPLAY_NAME)
-// But keep the user data folder at the original path, so the rename does not
-// orphan scripts created under the old name and the folder is the same whether
-// run from source or packaged.
-app.setPath('userData', path.join(app.getPath('appData'), 'Genspark'))
+// userData 曾经钉在应用的原名 "Genspark" 上,为的是改名之后别把老目录里的脚本
+// 变成孤儿。那在开发机上没问题,在用户机器上是错的:装了官方 Genspark 桌面客户端
+// 的机器上,%APPDATA%\Genspark 本来就是人家的 userData,我们等于住进了别人家,
+// 两个 Electron 应用共用一个 Chromium profile 目录。改用 laomao,并把老目录里
+// 属于我们的那部分搬过来一次 —— 判据是它有没有我们自己的文件,所以别人的目录
+// 一个字节都不会被碰。
+const appDataDir = app.getPath('appData')
+console.log('[user-data] 旧目录迁移结果:', migrateLegacyUserData(appDataDir))
+app.setPath('userData', userDataDir(appDataDir))
+console.log('[user-data] userData =', app.getPath('userData'))
 
 function openExternally(url) {
   if (isBrowsable(url)) shell.openExternal(url)
