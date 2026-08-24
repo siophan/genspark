@@ -54,7 +54,7 @@ jobs:
             exit 1
           fi
           # 用 node 写而不是 shell 拼接:邀请码是 base64,里面的 / + = 会被引号规则咬到。
-          node -e 'require("node:fs").writeFileSync("client-config.json", JSON.stringify({apiBase:"https://genspark-account-server.changingyin3.workers.dev",registerCode:process.env.REGISTER_CODE}))'
+          node -e 'require("node:fs").writeFileSync("client-config.json", JSON.stringify({apiBase:"https://gen.jh8.ai",registerCode:process.env.REGISTER_CODE}))'
 
       - name: Build Windows package
         run: npx electron-builder --win --publish never

@@ -32,18 +32,21 @@ function readBundledConfig({ fs = fsDefault, file = bundledConfigFile() } = {}) 
   } catch { return null }
 }
 
+// 返回 { token, apiBase } —— apiBase 是签发这个 token 的服务器。老版本写下的文件
+// 里没有这一项,那时归属未知,apiBase 为 null。
 function readClientToken(userDataDir, { fs = fsDefault } = {}) {
   try {
     const c = JSON.parse(fs.readFileSync(clientTokenFile(userDataDir), 'utf8'))
-    return typeof c.token === 'string' && c.token ? c.token : null
+    if (typeof c.token !== 'string' || !c.token) return null
+    return { token: c.token, apiBase: typeof c.apiBase === 'string' && c.apiBase ? c.apiBase : null }
   } catch { return null }
 }
 
-function writeClientToken(userDataDir, token, { fs = fsDefault } = {}) {
+function writeClientToken(userDataDir, token, { fs = fsDefault, apiBase = null } = {}) {
   // 0600:这是这台机器的通行证,同机别的用户不该读得到。理由同 writeCachedAccount,
   // mode 只在创建时生效,所以照样补一次 chmod。
   const file = clientTokenFile(userDataDir)
-  try { fs.writeFileSync(file, JSON.stringify({ token }), { mode: 0o600 }) }
+  try { fs.writeFileSync(file, JSON.stringify({ token, apiBase }), { mode: 0o600 }) }
   catch (e) {
     // 存不下来不该让这次启动失败 —— 本次照常用,只是下次会重新注册一个。
     console.error('[account-source] token write failed:', e.message)
@@ -168,10 +171,23 @@ async function resolveConfig(userDataDir, opts = {}) {
     return null
   }
 
+  // token 只对签发它的那台服务器有意义。服务器地址变了还拿着旧 token 去,会一路
+  // 401 —— 而客户端被 401 拒绝时绝不重新注册(否则后台停用就形同虚设),于是永久
+  // 卡死。所以判据是"这个 token 是不是这台服务器发的"这个纯本地事实,与网络无关,
+  // 更不是"被拒绝了就重来"。
+  //
+  // 老版本写下的文件没有 apiBase,一律当成"属于当前服务器"。反过来当成未知、
+  // 进而重新注册的话,等于给被停用的机器开了一条复活路径:升级一次就能领到新
+  // token,把后台的停用绕过去。宁可老装机在换服务器时需要一次人工处理,也不能
+  // 让吊销出现这种缺口 —— 换服务器时正确的做法是把 clients 表一起迁过去。
   const existing = readClientToken(userDataDir, { fs })
-  if (existing) {
+  if (existing && (existing.apiBase === null || existing.apiBase === bundled.apiBase)) {
     console.log('[account-source] 复用本机已有的 client-token.json')
-    return { apiBase: bundled.apiBase, token: existing }
+    return { apiBase: bundled.apiBase, token: existing.token }
+  }
+  if (existing) {
+    console.log('[account-source] 已有 token 是给 ' + (existing.apiBase || '(未知服务器)') +
+      ' 签发的,当前服务器是 ' + bundled.apiBase + ',重新注册')
   }
 
   // 只有在本地压根没有 token 时才走到这里。租号被 401 拒绝时绝不能触发注册 ——
@@ -185,7 +201,7 @@ async function resolveConfig(userDataDir, opts = {}) {
     return null
   }
   console.log('[account-source] 注册成功,token 已写入本机')
-  writeClientToken(userDataDir, token, { fs })
+  writeClientToken(userDataDir, token, { fs, apiBase: bundled.apiBase })
   return { apiBase: bundled.apiBase, token }
 }
 
@@ -198,7 +214,8 @@ function logTarget(userDataDir, opts = {}) {
   const bundled = readBundledConfig({ fs, file: bundledFile })
   const apiBase = (manual && manual.apiBase) || (bundled && bundled.apiBase)
   if (!apiBase) return null
-  const token = (manual && manual.token) || readClientToken(userDataDir, { fs })
+  const stored = readClientToken(userDataDir, { fs })
+  const token = (manual && manual.token) || (stored && stored.token)
   const registerCode = bundled ? bundled.registerCode : null
   // 两样都没有就没法过服务端那道认证,发出去只会白挨一个 401。
   if (!token && !registerCode) return null

@@ -403,7 +403,7 @@ test('writeClientToken 用 0600 并补 chmod', () => {
   assert.equal(writeClientToken('/u', 'tok', { fs }), true)
   assert.equal(writes[0].opts.mode, 0o600)
   assert.deepEqual(chmods, [{ p: TOKEN_FILE, mode: 0o600 }])
-  assert.equal(readClientToken('/u', { fs }), 'tok')
+  assert.deepEqual(readClientToken('/u', { fs }), { token: 'tok', apiBase: null })
 })
 
 test('writeClientToken 写失败返回 false 而不抛', () => {
@@ -432,7 +432,7 @@ test('首次启动:没有 token 就注册一个并落盘', async () => {
   assert.equal(calls.length, 1)
   assert.equal(calls[0].url, 'https://s.dev/api/register')
   assert.deepEqual(calls[0].body, { code: 'code1', device: 'test-mac' })
-  assert.equal(readClientToken('/u', { fs }), 'fresh-token')
+  assert.equal(readClientToken('/u', { fs }).token, 'fresh-token')
   assert.equal(writes.find((w) => w.p === TOKEN_FILE).opts.mode, 0o600)
 })
 
@@ -507,7 +507,7 @@ test('租号被 401 拒绝时绝不重新注册', async () => {
   const got = await resolveRemoteAccount('/u', cfgOpts(fs, fetch))
   assert.equal(got, null)
   assert.deepEqual(hits, ['https://s.dev/api/lease'], '只该试一次租号,绝不能再打 /api/register')
-  assert.equal(readClientToken('/u', { fs }), 'revoked', 'token 不该被换掉')
+  assert.equal(readClientToken('/u', { fs }).token, 'revoked', 'token 不该被换掉')
 })
 
 test('token 落盘失败时,本次仍然可用', async () => {
@@ -601,4 +601,75 @@ test('sendLogs 在服务器拒绝时返回 false,让调用方留着重试', asyn
     { fetch },
   )
   assert.equal(ok, false)
+})
+
+// ---- token 与签发它的服务器绑定 ----
+// token 只对签发它的那台服务器有意义。换了服务器地址还拿着旧 token 去,只会一直
+// 401 —— 而客户端按设计被 401 拒绝时绝不重新注册(否则后台停用就形同虚设),
+// 于是永久卡死。判据必须是"服务器换了"这个本地事实,不能是"被拒绝了"。
+test('token 文件记下签发它的 apiBase', async () => {
+  const files = {}
+  const writes = []
+  const fs = fakeFs(files, writes)
+  writeClientToken('/u', 'tok-1', { fs, apiBase: 'https://a.dev' })
+  assert.deepEqual(JSON.parse(files[TOKEN_FILE]), { token: 'tok-1', apiBase: 'https://a.dev' })
+})
+
+test('apiBase 一致时复用已有 token,不注册', async () => {
+  const fs = fakeFs({
+    [BUNDLED]: JSON.stringify({ apiBase: 'https://a.dev', registerCode: 'inv' }),
+    [TOKEN_FILE]: JSON.stringify({ token: 'tok-1', apiBase: 'https://a.dev' }),
+  })
+  let registered = 0
+  const fetch = async () => { registered++; return jsonResponse(200, { token: 'new' }) }
+  const cfg = await resolveConfig('/u', cfgOpts(fs, fetch))
+  assert.deepEqual(cfg, { apiBase: 'https://a.dev', token: 'tok-1' })
+  assert.equal(registered, 0)
+})
+
+test('服务器地址变了就重新注册,并写下新的归属', async () => {
+  const files = {
+    [BUNDLED]: JSON.stringify({ apiBase: 'https://new.dev', registerCode: 'inv' }),
+    [TOKEN_FILE]: JSON.stringify({ token: 'old-tok', apiBase: 'https://old.dev' }),
+  }
+  const fs = fakeFs(files)
+  const fetch = async () => jsonResponse(200, { token: 'fresh-tok', client_id: 9 })
+  const cfg = await resolveConfig('/u', cfgOpts(fs, fetch))
+  assert.equal(cfg.token, 'fresh-tok')
+  assert.equal(cfg.apiBase, 'https://new.dev')
+  assert.deepEqual(JSON.parse(files[TOKEN_FILE]), { token: 'fresh-tok', apiBase: 'https://new.dev' })
+})
+
+// 老版本写下的文件没有 apiBase。反过来当成"未知 → 重新注册"的话,等于给被停用的
+// 机器开了一条复活路径:升级一次就领到新 token,后台的停用被绕过去。所以一律当成
+// 属于当前服务器,一个请求都不发。
+test('老格式(没有 apiBase)当作属于当前服务器,绝不重新注册', async () => {
+  const fs = fakeFs({
+    [BUNDLED]: JSON.stringify({ apiBase: 'https://a.dev', registerCode: 'inv' }),
+    [TOKEN_FILE]: JSON.stringify({ token: 'legacy-tok' }),
+  })
+  let called = 0
+  const fetch = async () => { called++; return jsonResponse(200, { token: 'fresh', client_id: 1 }) }
+  const cfg = await resolveConfig('/u', cfgOpts(fs, fetch))
+  assert.deepEqual(cfg, { apiBase: 'https://a.dev', token: 'legacy-tok' })
+  assert.equal(called, 0, '老格式绝不能触发注册 —— 那会让停用的机器复活')
+})
+
+// 手写的 server-config.json 优先级最高,它自带 token,不受这套归属判断影响。
+test('server-config.json 存在时完全不看 client-token.json', async () => {
+  const fs = fakeFs({
+    [SERVER_CFG]: JSON.stringify({ apiBase: 'https://manual.dev', token: 'manual-tok' }),
+    [TOKEN_FILE]: JSON.stringify({ token: 'auto-tok', apiBase: 'https://other.dev' }),
+  })
+  const cfg = await resolveConfig('/u', cfgOpts(fs, async () => jsonResponse(200, {})))
+  assert.deepEqual(cfg, { apiBase: 'https://manual.dev', token: 'manual-tok' })
+})
+
+test('logTarget 认新格式的 token 文件', async () => {
+  const fs = fakeFs({
+    [BUNDLED]: JSON.stringify({ apiBase: 'https://a.dev', registerCode: 'inv' }),
+    [TOKEN_FILE]: JSON.stringify({ token: 'tok-9', apiBase: 'https://a.dev' }),
+  })
+  const t = await logTarget('/u', cfgOpts(fs, async () => jsonResponse(200, {})))
+  assert.equal(t.token, 'tok-9')
 })

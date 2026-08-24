@@ -3,26 +3,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { makeDb } from '../src/db.js'
+// 测试和自建部署共用同一个 shim:这样这几十个用例验证的就是真正跑在服务器上的那份代码。
+import { d1Shim } from '../src/sqlite-d1.js'
 
 const schema = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8')
 
-// 极薄的 D1 兼容 shim,让为 D1 binding 写的 db.js 能在本地用 node:sqlite 测试,
-// 无需 workerd/miniflare。D1 底层即 SQLite,prepare/bind/first/all/run 语义一致。
-function d1Shim(sqlite) {
-  return {
-    prepare(sql) {
-      const stmt = sqlite.prepare(sql)
-      let bound = []
-      const api = {
-        bind(...args) { bound = args; return api },
-        first() { const r = stmt.get(...bound); return r === undefined ? null : r },
-        all() { return { results: stmt.all(...bound) } },
-        run() { return stmt.run(...bound) },
-      }
-      return api
-    },
-  }
-}
 
 let d1
 beforeEach(() => {

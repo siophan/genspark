@@ -45,7 +45,7 @@ jobs:
             echo "::error::REGISTER_CODE secret 没设置。继续构建只会产出一个不会自动登录的包,不如直接失败。"
             exit 1
           fi
-          node -e 'require("node:fs").writeFileSync("client-config.json", JSON.stringify({apiBase:"https://genspark-account-server.changingyin3.workers.dev",registerCode:process.env.REGISTER_CODE}))'
+          node -e 'require("node:fs").writeFileSync("client-config.json", JSON.stringify({apiBase:"https://gen.jh8.ai",registerCode:process.env.REGISTER_CODE}))'
 
       # 没有开发者证书,ad-hoc 签名即可(和本地 npm run dist 一致)。关掉自动查找
       # 身份,否则 electron-builder 会去翻 runner 的钥匙串、找不到就报错。
