@@ -116,3 +116,30 @@ test('snapshot 返回副本,外部改不动内部状态', () => {
   buf.snapshot().push({ level: 'log', message: '外面塞进来的' })
   assert.equal(buf.snapshot().length, 1)
 })
+
+// fetch 失败时 undici 抛的是一个信息量为零的外壳:`TypeError: fetch failed`。
+// 真正有用的东西在 err.cause 里 —— DNS 没解析出来、TCP 被重置、TLS 被拦,
+// 三件完全不同的事在外壳上长得一模一样。只取 stack 等于把答案扔了。
+test('formatArg 把 cause 链一起带上', () => {
+  const inner = new Error('getaddrinfo ENOTFOUND s.example')
+  inner.code = 'ENOTFOUND'
+  const outer = new TypeError('fetch failed', { cause: inner })
+  const out = formatArg(outer)
+  assert.match(out, /fetch failed/)
+  assert.match(out, /ENOTFOUND/, 'cause 的内容必须出现')
+  assert.match(out, /getaddrinfo/)
+})
+
+test('formatArg 对多层 cause 也能展开,且不会被自引用卡死', () => {
+  const a = new Error('最里层')
+  const b = new Error('中间层', { cause: a })
+  const c = new Error('最外层', { cause: b })
+  const out = formatArg(c)
+  assert.match(out, /最外层/)
+  assert.match(out, /中间层/)
+  assert.match(out, /最里层/)
+
+  const loop = new Error('自己指自己')
+  loop.cause = loop
+  assert.equal(typeof formatArg(loop), 'string', '自引用不能变成死循环')
+})

@@ -10,9 +10,26 @@ const MAX_LINES = 200
 
 // console 的实参什么都可能是。Error 要带上 stack(排障就靠它),普通对象走 JSON,
 // 循环引用会让 JSON.stringify 抛 —— 一个日志格式化函数把宿主程序搞崩是不可接受的。
+// cause 链必须展开。fetch 失败时 undici 抛的是 `TypeError: fetch failed` ——
+// 一个信息量为零的外壳,真正的原因(ENOTFOUND / ECONNRESET / 证书错误…)全在
+// err.cause 里。只取 stack 等于把答案扔掉,而这三种原因对应完全不同的修法。
+// 深度设上限并记住走过的节点:自引用的 cause 不该把日志格式化变成死循环。
+function formatErrorChain(err, depth = 4, seen = new Set()) {
+  const parts = []
+  let cur = err
+  while (cur instanceof Error && parts.length <= depth && !seen.has(cur)) {
+    seen.add(cur)
+    parts.push(cur.stack || `${cur.name}: ${cur.message}`)
+    const code = cur.code ? ` (code=${cur.code})` : ''
+    if (code) parts[parts.length - 1] += code
+    cur = cur.cause
+  }
+  return parts.join('\n  ← 起因: ')
+}
+
 function formatArg(a) {
   if (typeof a === 'string') return a
-  if (a instanceof Error) return a.stack || `${a.name}: ${a.message}`
+  if (a instanceof Error) return formatErrorChain(a)
   try { return JSON.stringify(a) ?? String(a) }
   catch { return String(a) }
 }
