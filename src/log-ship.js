@@ -19,6 +19,9 @@ function formatArg(a) {
 
 function createLogBuffer({ max = MAX_LINES, target = console } = {}) {
   const lines = []
+  // 待发队列(lines)会被上报清空,但诊断面板要把这一整场启动摊开给人看,
+  // 所以历史单独留一份,不随上报消失。
+  const history = []
   const originals = {}
   let paused = false
 
@@ -28,7 +31,9 @@ function createLogBuffer({ max = MAX_LINES, target = console } = {}) {
     if (paused) return
     // 溢出时丢新的、留旧的:故障的成因在开头,后面全是它的回声。
     if (lines.length >= max) return
-    lines.push({ level, message: args.map(formatArg).join(' ') })
+    const line = { level, message: args.map(formatArg).join(' ') }
+    lines.push(line)
+    if (history.length < max) history.push(line)
   }
 
   function install() {
@@ -60,7 +65,8 @@ function createLogBuffer({ max = MAX_LINES, target = console } = {}) {
     return ok
   }
 
-  return { install, restore, flush, size: () => lines.length }
+  // 副本:面板拿到的是快照,外面怎么改都动不了内部状态。
+  return { install, restore, flush, size: () => lines.length, snapshot: () => history.slice() }
 }
 
 module.exports = { createLogBuffer, formatArg, MAX_LINES }

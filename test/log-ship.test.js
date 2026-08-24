@@ -91,3 +91,28 @@ test('formatArg 不会因为循环引用而抛', () => {
   a.self = a
   assert.equal(typeof formatArg(a), 'string')
 })
+
+// 上报成功会把待发队列清空,但诊断面板还要拿这些行给人看 —— 所以历史要单独留一份。
+test('snapshot 保留全部记录,上报清空待发队列也不影响它', async () => {
+  const target = fakeConsole()
+  const buf = createLogBuffer({ target })
+  buf.install()
+  target.log('一')
+  target.error('二')
+  await buf.flush(async () => true)
+  target.log('三')
+  buf.restore()
+
+  assert.equal(buf.size(), 1, '待发队列里只剩上报之后那一行')
+  assert.deepEqual(buf.snapshot().map((l) => l.message), ['一', '二', '三'], '历史三行都在')
+})
+
+test('snapshot 返回副本,外部改不动内部状态', () => {
+  const target = fakeConsole()
+  const buf = createLogBuffer({ target })
+  buf.install()
+  target.log('一')
+  buf.restore()
+  buf.snapshot().push({ level: 'log', message: '外面塞进来的' })
+  assert.equal(buf.snapshot().length, 1)
+})

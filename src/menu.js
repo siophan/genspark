@@ -2,7 +2,7 @@ const { Menu, app } = require('electron')
 
 // The standard edit/window items must stay: without them the page loses the
 // system copy/paste and window shortcuts.
-function buildMenu({ onOpenScriptsDir }) {
+function buildMenu({ onOpenScriptsDir, onShowDiagnostics }) {
   const isMac = process.platform === 'darwin'
   const template = [
     {
@@ -15,6 +15,8 @@ function buildMenu({ onOpenScriptsDir }) {
           accelerator: 'CmdOrCtrl+,',
           click: onOpenScriptsDir,
         },
+        // 自动登录失败时会自己弹出来,但用户关掉之后得有路再打开它。
+        { label: '启动诊断', click: onShowDiagnostics },
         { type: 'separator' },
         // hide/services/unhide are macOS-only roles; on Windows and Linux they
         // do not apply, so the app menu there is just About / Scripts / Quit.

@@ -30,10 +30,11 @@ const {
 const { buildLoginScript } = require('./auto-login')
 const { serveAccount, registerLoginScript, clearLoginScript } = require('./account-bridge')
 const {
-  resolveRemoteAccount, renewTrackedLeases, releaseLease, logTarget, sendLogs,
+  resolveRemoteAccount, renewTrackedLeases, releaseLease, logTarget, sendLogs, bundledConfigFile,
 } = require('./account-source')
 const { createLogBuffer } = require('./log-ship')
 const { userDataDir, migrateLegacyUserData } = require('./user-data')
+const { collectFacts, renderDiagnosticsHtml } = require('./diagnostics')
 
 // 装在最靠前的地方:取号发生在启动的头几百毫秒里,晚装一步就少一步日志。
 // 打包后的应用没有可看的控制台,这个缓冲是那段过程唯一的观测口。
@@ -65,6 +66,29 @@ const appDataDir = app.getPath('appData')
 console.log('[user-data] 旧目录迁移结果:', migrateLegacyUserData(appDataDir))
 app.setPath('userData', userDataDir(appDataDir))
 console.log('[user-data] userData =', app.getPath('userData'))
+
+// 自动登录没成时,把原因直接摆到屏幕上。上报到服务器那条路在"连不上服务器"时恰好
+// 是断的 —— 而那正是最需要看见原因的时候,所以本机必须也有一份,并且能复制走。
+let diagWindow = null
+function showDiagnostics() {
+  try {
+    if (diagWindow && !diagWindow.isDestroyed()) { diagWindow.focus(); return }
+    const facts = collectFacts({
+      platform: process.platform,
+      version: app.getVersion(),
+      electron: process.versions.electron,
+      userDataDir: app.getPath('userData'),
+      bundledFile: bundledConfigFile(),
+    })
+    const html = renderDiagnosticsHtml(facts, logBuffer.snapshot())
+    diagWindow = new BrowserWindow({ width: 760, height: 600, title: '启动诊断' })
+    diagWindow.on('closed', () => { diagWindow = null })
+    diagWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+  } catch (err) {
+    // 诊断设施自己把应用带崩是最难看的失败方式。
+    console.error('[diag] 诊断窗口打不开:', err)
+  }
+}
 
 function openExternally(url) {
   if (isBrowsable(url)) shell.openExternal(url)
@@ -245,7 +269,13 @@ async function openWindow(dir) {
   try {
     // Resolving the account can take a network round trip, so the window waits
     // for it — one created without an account would never auto-log-in.
-    createWindow(dir, await resolveAccountSafely())
+    const account = await resolveAccountSafely()
+    createWindow(dir, account)
+    // 没有服务端租约 = 这次没按预期取到号(彻底没账号,或回落到了本机缓存/桌面池)。
+    // 对用户来说唯一可见的症状就是"没自动登录",所以在这里把原因摆出来。
+    // 必须排在 createWindow 之后:openWindow 用"当前有没有窗口"当闸门,
+    // 诊断窗口先开出来会把主窗口挡在门外。
+    if (!account || !account.lease) showDiagnostics()
   } catch (err) {
     console.error('[window] could not open a window:', err)
   } finally {
@@ -269,7 +299,7 @@ app.whenReady().then(async () => {
   ensureScriptDir(dir)
   serveScripts(dir)
   serveAccount()
-  buildMenu({ onOpenScriptsDir: () => shell.openPath(dir) })
+  buildMenu({ onOpenScriptsDir: () => shell.openPath(dir), onShowDiagnostics: showDiagnostics })
   await openWindow(dir)
   await shipLogs()
 }).catch((err) => {
